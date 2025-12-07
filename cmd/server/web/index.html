@@ -1,0 +1,65 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Network Infrastructure</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=VT323&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="/style.css">
+    <script src="https://unpkg.com/vis-network@9.1.9/standalone/umd/vis-network.min.js"></script>
+</head>
+<body>
+    <div class="crt-overlay"></div>
+
+    <header class="header">
+        <div class="header-content">
+            <div class="title-section">
+                <h1 class="title">NETWORK INFRASTRUCTURE</h1>
+                <p class="subtitle">&gt; MACHINE SPIRIT TOPOLOGY VISUALIZATION</p>
+            </div>
+            <div class="header-right">
+                <button class="refresh-button" id="refresh-btn" title="Refresh network data">
+                    <svg class="refresh-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M21 2v6h-6M3 12a9 9 0 0 1 15-6.7L21 8M3 22v-6h6M21 12a9 9 0 0 1-15 6.7L3 16"/>
+                    </svg>
+                    <span class="refresh-label">REFRESH</span>
+                </button>
+                <div class="stats" id="stats">
+                    <div class="stat-item">
+                        <span class="stat-value" id="node-count">--</span>
+                        <span class="stat-label">[NODES]</span>
+                    </div>
+                    <div class="stat-item">
+                        <span class="stat-value" id="edge-count">--</span>
+                        <span class="stat-label">[LINKS]</span>
+                    </div>
+                    <div class="stat-item">
+                        <span class="stat-value" id="client-count">01</span>
+                        <span class="stat-label">[CLIENTS]</span>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </header>
+
+    <main class="main-container">
+        <div class="diagram-wrapper">
+            <div id="network-container"></div>
+        </div>
+        <div class="loading-container" id="loading">
+            <div class="loading-spinner"></div>
+            <p class="loading-text">COMMUNING WITH MACHINE SPIRIT<span class="cursor">_</span></p>
+        </div>
+    </main>
+
+    <footer class="status-footer">
+        <span id="status">&gt; STATUS: CONNECTING</span>
+        <span>|</span>
+        <span>BY THE OMNISSIAH'S WILL</span>
+    </footer>
+
+    <script src="/app.js"></script>
+</body>
+</html>

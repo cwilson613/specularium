@@ -1,0 +1,187 @@
+version: "1.0"
+
+metadata:
+  network:
+    cidr: "192.168.0.0/24"
+    gateway: "192.168.0.1"
+    domains:
+      internal: "vanderlyn.local"
+      external: "vanderlyn.house"
+  description: "Vanderlyn Network Infrastructure"
+
+groups:
+  dns:
+    members:
+      - astronomican
+      - lighthouse
+    description: "DNS servers"
+
+  k3s:
+    members:
+      - brutus
+      - node-control-0
+      - node-worker-0
+      - node-worker-1
+    description: "Kubernetes cluster"
+
+  infrastructure:
+    members:
+      - seed
+      - nas
+    description: "Core infrastructure"
+
+hosts:
+  # Router
+  er8411:
+    ip: "192.168.0.1"
+    role: "Router/Gateway"
+    platform: "edgeos"
+    classification: device
+    network:
+      ports:
+        - name: wan
+          speed_gbps: 1
+        - name: lan1
+          speed_gbps: 2.5
+        - name: lan2
+          speed_gbps: 2.5
+
+  # DNS Servers
+  astronomican:
+    ip: "192.168.0.10"
+    role: "DNS Server (Primary)"
+    platform: "debian"
+    version: "12"
+    network:
+      ports:
+        - name: eth0
+          speed_gbps: 1
+          connected_to: "er8411:lan1"
+
+  lighthouse:
+    ip: "192.168.0.11"
+    role: "DNS Server (Secondary)"
+    platform: "debian"
+    version: "12"
+    network:
+      ports:
+        - name: eth0
+          speed_gbps: 1
+          connected_to: "er8411:lan1"
+
+  # K3s Cluster
+  brutus:
+    ip: "192.168.0.20"
+    role: "K8s Control Plane"
+    platform: "debian"
+    version: "12"
+    hardware:
+      cpu: "Intel i7-12700"
+      ram_gb: 64
+      network_ports: 2
+    network:
+      ports:
+        - name: eth0
+          speed_gbps: 2.5
+          connected_to: "er8411:lan1"
+
+  node-control-0:
+    ip: "192.168.0.21"
+    role: "K8s Control Plane"
+    platform: "debian"
+    version: "12"
+    network:
+      ports:
+        - name: eth0
+          speed_gbps: 1
+          connected_to: "er8411:lan1"
+
+  node-worker-0:
+    ip: "192.168.0.22"
+    role: "K8s Worker"
+    platform: "debian"
+    version: "12"
+    hardware:
+      gpu: "NVIDIA RTX 3080"
+    network:
+      ports:
+        - name: eth0
+          speed_gbps: 2.5
+          connected_to: "er8411:lan1"
+
+  node-worker-1:
+    ip: "192.168.0.23"
+    role: "K8s Worker"
+    platform: "debian"
+    version: "12"
+    network:
+      ports:
+        - name: eth0
+          speed_gbps: 1
+          connected_to: "er8411:lan1"
+
+  # Infrastructure
+  seed:
+    ip: "192.168.0.100"
+    role: "Application Host"
+    platform: "debian"
+    version: "12"
+    description: "Docker host running Komodo stacks"
+    network:
+      ports:
+        - name: eth0
+          speed_gbps: 2.5
+          connected_to: "er8411:lan2"
+
+  nas:
+    ip: "192.168.0.50"
+    role: "Storage Server"
+    platform: "truenas"
+    description: "TrueNAS Scale storage server"
+    hardware:
+      cpu: "Intel Xeon E-2236"
+      ram_gb: 128
+      storage_gb: 120000
+    network:
+      ports:
+        - name: eth0
+          speed_gbps: 10
+          connected_to: "er8411:lan2"
+
+  # Omada Controller
+  omada:
+    ip: "192.168.0.5"
+    role: "Network Controller"
+    platform: "docker"
+    classification: device
+    description: "TP-Link Omada SDN Controller"
+    network:
+      ports:
+        - name: eth0
+          speed_gbps: 1
+          connected_to: "er8411:lan1"
+
+  # Access Points
+  ap-living:
+    ip: "192.168.0.61"
+    role: "Access Point"
+    platform: "omada"
+    classification: device
+    description: "Living room AP"
+    network:
+      ports:
+        - name: eth0
+          speed_gbps: 1
+          connected_to: "omada:eth0"
+
+  ap-office:
+    ip: "192.168.0.62"
+    role: "Access Point"
+    platform: "omada"
+    classification: device
+    description: "Office AP"
+    network:
+      ports:
+        - name: eth0
+          speed_gbps: 1
+          connected_to: "omada:eth0"
