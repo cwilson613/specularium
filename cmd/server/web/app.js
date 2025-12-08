@@ -884,7 +884,7 @@
                 }
             }
             if (node.has_discrepancy) {
-                html += `\n[!] HAS DISCREPANCIES - Review required\n`;
+                html += `\n[!] HERESY DETECTED - Purge required\n`;
             }
         }
 
@@ -1068,33 +1068,53 @@
         setTimeout(updateZoomDisplay, 310);
     }
 
-    // Add a single node
+    // Add or update a single node (incremental update that preserves physics)
     async function addNode(nodeData) {
         if (!nodesDataSet) return;
 
         const typeConfig = nodeTypes[nodeData.type] || nodeTypes.unknown;
         const status = nodeData.status || 'unverified';
-        const statusColor = statusColors[status] || statusColors.unverified;
+        const truthStatus = nodeData.truth_status || '';
+
+        // Truth status takes precedence for border color (matches renderNetwork)
+        let borderColor;
+        if (truthStatus === 'conflict') {
+            borderColor = truthColors.conflict;  // Amber for conflicts
+        } else if (truthStatus === 'asserted') {
+            borderColor = truthColors.asserted;  // Gold for asserted truth
+        } else {
+            borderColor = statusColors[status] || statusColors.unverified;
+        }
+
+        // Tint icon based on status
         const iconColor = (status === 'verified' || status === 'degraded')
             ? typeConfig.color
             : theme.gray;
         const iconDataUri = await getTintedIcon(typeConfig.icon, iconColor);
 
+        // Add truth indicator to label (matches renderNetwork)
+        let label = (nodeData.label || nodeData.id).toUpperCase();
+        if (truthStatus === 'asserted') {
+            label = '\u2713 ' + label;  // Checkmark for truth
+        } else if (truthStatus === 'conflict') {
+            label = '\u26A0 ' + label;  // Warning for conflict
+        }
+
         nodesDataSet.update({
             id: nodeData.id,
-            label: (nodeData.label || nodeData.id).toUpperCase(),
+            label: label,
             title: buildTooltip(nodeData),
             shape: 'circularImage',
             image: iconDataUri,
             size: typeConfig.size,
             color: {
-                border: statusColor,
+                border: borderColor,
                 background: theme.offBlack,
                 highlight: { border: theme.greenBright, background: theme.greenDarker },
                 hover: { border: theme.greenBright, background: theme.greenDarker }
             },
-            borderWidth: 2,
-            font: { color: statusColor, face: 'VT323, monospace', size: 14, vadjust: 8 }
+            borderWidth: truthStatus ? 3 : 2,  // Thicker border for truth nodes
+            font: { color: borderColor, face: 'VT323, monospace', size: 14, vadjust: 8 }
         });
 
         updateStats();
@@ -1210,7 +1230,7 @@
 
     function renderDiscrepancies() {
         if (!discrepancies || discrepancies.length === 0) {
-            elements.discrepancyContent.innerHTML = '<div class="discrepancy-empty">No discrepancies</div>';
+            elements.discrepancyContent.innerHTML = '<div class="discrepancy-empty">No heresy detected. The Omnissiah is pleased.</div>';
             return;
         }
 
@@ -1269,13 +1289,18 @@
             currentNodeData = node;
 
             // Update modal title
-            elements.nodeDetailTitle.textContent = `> ${node.label || node.id}`;
+            elements.nodeDetailTitle.textContent = `> ${(node.label || node.id).toUpperCase()}`;
 
-            // Render node info
-            renderNodeInfo(node);
-
-            // Render truth properties
+            // Render all modal sections
+            renderStatusBar(node);
+            renderExistenceSection(node);
+            renderIdentitySection(node);
+            renderNetworkSection(node);
+            renderHostnameInferenceSection(node);
             renderTruthProperties(node);
+
+            // Setup collapsible section toggle
+            setupCollapsibleSections();
 
             // Show modal
             elements.nodeDetailModal.classList.add('active');
@@ -1292,59 +1317,208 @@
         currentNodeData = null;
     }
 
-    function renderNodeInfo(node) {
+    function renderStatusBar(node) {
         const status = node.status || 'unverified';
-        const statusClass = 'status-' + status;
+        const statusBar = document.getElementById('node-status-bar');
 
-        let html = '<div class="node-detail-info">';
+        let html = `
+            <div class="status-item">
+                <span class="status-label">STATUS</span>
+                <span class="status-value ${status}">${status.toUpperCase()}</span>
+            </div>
+        `;
 
-        // Basic info
-        html += `<div class="node-detail-row"><span class="node-detail-label">ID:</span><span class="node-detail-value">${node.id}</span></div>`;
-        html += `<div class="node-detail-row"><span class="node-detail-label">TYPE:</span><span class="node-detail-value">${node.type || 'unknown'}</span></div>`;
-        html += `<div class="node-detail-row"><span class="node-detail-label">STATUS:</span><span class="node-detail-value ${statusClass}">${status.toUpperCase()}</span></div>`;
-
-        // Properties
-        if (node.properties) {
-            if (node.properties.ip) {
-                html += `<div class="node-detail-row"><span class="node-detail-label">IP:</span><span class="node-detail-value">${node.properties.ip}</span></div>`;
-            }
-            if (node.properties.description) {
-                html += `<div class="node-detail-row"><span class="node-detail-label">DESCRIPTION:</span><span class="node-detail-value">${node.properties.description}</span></div>`;
-            }
-        }
-
-        // Discovered info
-        if (node.discovered) {
-            if (node.discovered.mac_address) {
-                html += `<div class="node-detail-row"><span class="node-detail-label">MAC:</span><span class="node-detail-value">${node.discovered.mac_address}</span></div>`;
-            }
-            if (node.discovered.reverse_dns) {
-                html += `<div class="node-detail-row"><span class="node-detail-label">DNS:</span><span class="node-detail-value">${node.discovered.reverse_dns}</span></div>`;
-            }
-            if (node.discovered.services && node.discovered.services.length > 0) {
-                let servicesHtml = '<div class="node-detail-services">';
-                node.discovered.services.forEach(s => {
-                    servicesHtml += `<div class="service-item">${s.port}/${s.service}${s.banner ? ' - ' + s.banner.substring(0, 50) : ''}</div>`;
-                });
-                servicesHtml += '</div>';
-                html += `<div class="node-detail-row"><span class="node-detail-label">SERVICES:</span><span class="node-detail-value">${servicesHtml}</span></div>`;
-            }
-        }
-
-        // Last verified
         if (node.last_verified) {
             const lastVerified = new Date(node.last_verified).toLocaleString();
-            html += `<div class="node-detail-row"><span class="node-detail-label">VERIFIED:</span><span class="node-detail-value">${lastVerified}</span></div>`;
+            html += `
+                <div class="status-item">
+                    <span class="status-label">LAST VERIFIED</span>
+                    <span class="status-value">${lastVerified}</span>
+                </div>
+            `;
         }
 
-        // Truth status
         if (node.truth_status) {
-            const truthClass = node.truth_status === 'conflict' ? 'status-degraded' : 'status-verified';
-            html += `<div class="node-detail-row"><span class="node-detail-label">TRUTH:</span><span class="node-detail-value ${truthClass}">${node.truth_status.toUpperCase()}</span></div>`;
+            const truthClass = node.truth_status === 'conflict' ? 'status-value degraded' : 'status-value highlight';
+            html += `
+                <div class="status-item">
+                    <span class="status-label">TRUTH</span>
+                    <span class="${truthClass}">${node.truth_status.toUpperCase()}</span>
+                </div>
+            `;
+        }
+
+        statusBar.innerHTML = html;
+    }
+
+    function renderExistenceSection(node) {
+        // Get current existence value from truth
+        let existenceValue = '';
+        if (node.truth && node.truth.properties && node.truth.properties.existence) {
+            existenceValue = node.truth.properties.existence;
+        }
+
+        // Set the appropriate radio button
+        const radios = document.querySelectorAll('input[name="existence"]');
+        radios.forEach(radio => {
+            radio.checked = (radio.value === existenceValue);
+        });
+    }
+
+    function renderIdentitySection(node) {
+        const container = document.getElementById('node-identity-content');
+
+        let html = '<div class="property-grid">';
+        html += `
+            <div class="property-item">
+                <span class="property-label">ID</span>
+                <span class="property-value">${node.id}</span>
+            </div>
+            <div class="property-item">
+                <span class="property-label">TYPE</span>
+                <span class="property-value">${node.type || 'unknown'}</span>
+            </div>
+            <div class="property-item">
+                <span class="property-label">LABEL</span>
+                <span class="property-value">${node.label || node.id}</span>
+            </div>
+        `;
+
+        if (node.source) {
+            html += `
+                <div class="property-item">
+                    <span class="property-label">SOURCE</span>
+                    <span class="property-value">${node.source}</span>
+                </div>
+            `;
         }
 
         html += '</div>';
-        elements.nodeDetailContent.innerHTML = html;
+        container.innerHTML = html;
+    }
+
+    function renderNetworkSection(node) {
+        const container = document.getElementById('node-network-content');
+        const props = node.properties || {};
+        const discovered = node.discovered || {};
+
+        let html = '<div class="property-grid">';
+
+        // IP
+        const ip = props.ip || discovered.ip;
+        if (ip) {
+            html += `
+                <div class="property-item">
+                    <span class="property-label">IP ADDRESS</span>
+                    <span class="property-value">${ip}</span>
+                </div>
+            `;
+        }
+
+        // MAC
+        const mac = discovered.mac_address || props.mac_address;
+        if (mac) {
+            html += `
+                <div class="property-item">
+                    <span class="property-label">MAC ADDRESS</span>
+                    <span class="property-value">${mac}</span>
+                </div>
+            `;
+        }
+
+        // Reverse DNS
+        if (discovered.reverse_dns) {
+            html += `
+                <div class="property-item">
+                    <span class="property-label">REVERSE DNS</span>
+                    <span class="property-value">${discovered.reverse_dns}</span>
+                </div>
+            `;
+        }
+
+        // Latency
+        if (discovered.ping_latency_ms !== undefined) {
+            html += `
+                <div class="property-item">
+                    <span class="property-label">LATENCY</span>
+                    <span class="property-value">${discovered.ping_latency_ms}ms</span>
+                </div>
+            `;
+        }
+
+        // Open Ports
+        if (discovered.open_ports && discovered.open_ports.length > 0) {
+            html += `
+                <div class="property-item">
+                    <span class="property-label">OPEN PORTS</span>
+                    <span class="property-value">${discovered.open_ports.join(', ')}</span>
+                </div>
+            `;
+        }
+
+        // Services
+        if (discovered.services && discovered.services.length > 0) {
+            const serviceList = discovered.services.map(s =>
+                `${s.port}/${s.service}`
+            ).join(', ');
+            html += `
+                <div class="property-item" style="grid-column: span 2;">
+                    <span class="property-label">SERVICES</span>
+                    <span class="property-value">${serviceList}</span>
+                </div>
+            `;
+        }
+
+        html += '</div>';
+
+        if (html === '<div class="property-grid"></div>') {
+            html = '<span class="property-value dim">No network data discovered</span>';
+        }
+
+        container.innerHTML = html;
+    }
+
+    function renderHostnameInferenceSection(node) {
+        const section = document.getElementById('hostname-inference-section');
+        const container = document.getElementById('hostname-inference-content');
+
+        const inference = node.discovered?.hostname_inference;
+        if (!inference || !inference.candidates || inference.candidates.length === 0) {
+            section.style.display = 'none';
+            return;
+        }
+
+        section.style.display = 'block';
+
+        let html = '<div class="inference-candidates">';
+
+        for (const candidate of inference.candidates) {
+            const isBest = inference.best && candidate.hostname === inference.best.hostname;
+            const confidencePercent = Math.round(candidate.confidence * 100);
+
+            html += `
+                <div class="inference-candidate ${isBest ? 'best' : ''}">
+                    <span class="inference-hostname">${candidate.hostname}</span>
+                    <span class="inference-confidence">${confidencePercent}%</span>
+                    <span class="inference-source">${candidate.source}</span>
+                </div>
+            `;
+        }
+
+        html += '</div>';
+        container.innerHTML = html;
+    }
+
+    function setupCollapsibleSections() {
+        const toggle = document.getElementById('truth-section-toggle');
+        if (toggle) {
+            toggle.onclick = () => {
+                const section = toggle.closest('.collapsible');
+                if (section) {
+                    section.classList.toggle('collapsed');
+                }
+            };
+        }
     }
 
     // Truthable properties
@@ -1422,8 +1596,16 @@
     async function handleSetTruth() {
         if (!currentNodeId) return;
 
-        // Gather checked properties
+        // Gather properties
         const properties = {};
+
+        // Get existence from radio buttons
+        const existenceRadio = document.querySelector('input[name="existence"]:checked');
+        if (existenceRadio && existenceRadio.value) {
+            properties.existence = existenceRadio.value;
+        }
+
+        // Gather checked truth properties
         elements.truthProperties.querySelectorAll('.truth-property-checkbox:checked').forEach(checkbox => {
             const prop = checkbox.getAttribute('data-prop');
             const input = elements.truthProperties.querySelector(`input.truth-property-input[data-prop="${prop}"]`);
@@ -1434,13 +1616,13 @@
         });
 
         if (Object.keys(properties).length === 0) {
-            updateStatus('ERROR: NO PROPERTIES SELECTED');
+            updateStatus('ERROR: NO PROPERTIES SET');
             return;
         }
 
         try {
             elements.setTruthBtn.disabled = true;
-            updateStatus('SETTING TRUTH');
+            updateStatus('SAVING TRUTH');
 
             const response = await fetch(`/api/nodes/${currentNodeId}/truth`, {
                 method: 'PUT',
@@ -1453,7 +1635,7 @@
                 throw new Error(error.details || error.error || `HTTP ${response.status}`);
             }
 
-            updateStatus('TRUTH SET');
+            updateStatus('TRUTH SAVED');
             closeNodeDetailModal();
             await loadGraph();
             await loadDiscrepancies();
@@ -1554,8 +1736,8 @@
                     addDiscoveryEntry(event.payload);
                     updateStatus(`DISCOVERY COMPLETE: ${event.payload.verified || 0} VERIFIED`);
                 }
-                // Reload graph to show updated statuses
-                loadGraph();
+                // Don't reload graph - individual node-updated events already updated the UI
+                // loadGraph() would reset physics positions
                 break;
 
             // Truth events
@@ -1572,7 +1754,7 @@
             // Discrepancy events
             case 'discrepancy-created':
                 loadDiscrepancies();
-                updateStatus(`DISCREPANCY: ${event.payload?.node_id || 'node'} - ${event.payload?.property || 'property'}`);
+                updateStatus(`HERESY DETECTED: ${event.payload?.node_id || 'node'} - ${event.payload?.property || 'property'}`);
                 break;
 
             case 'discrepancy-resolved':

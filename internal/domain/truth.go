@@ -69,8 +69,18 @@ const (
 	ResolutionDismissed    DiscrepancyResolution = "dismissed"     // Discrepancy was dismissed/ignored
 )
 
+// ExistenceAssertion defines the expected existence state of a node
+type ExistenceAssertion string
+
+const (
+	ExistenceExpected  ExistenceAssertion = "expected"  // Node should exist and be reachable
+	ExistenceRetired   ExistenceAssertion = "retired"   // Node should be offline/decommissioned
+	ExistenceTemporary ExistenceAssertion = "temporary" // Node may come and go (no discrepancy either way)
+)
+
 // TruthableProperties defines which properties can be locked as operator truth
 var TruthableProperties = []string{
+	"existence", // Whether node should exist (expected, retired, temporary)
 	"ip",
 	"hostname",
 	"mac_address",

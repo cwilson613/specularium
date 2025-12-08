@@ -1010,6 +1010,55 @@ func (r *Repository) UpdateNodeVerification(ctx context.Context, nodeID string, 
 	return nil
 }
 
+// UpdateNodeLabel updates only the label of a node
+func (r *Repository) UpdateNodeLabel(ctx context.Context, nodeID string, label string) error {
+	_, err := r.db.ExecContext(ctx, `
+		UPDATE nodes
+		SET label = ?, updated_at = ?
+		WHERE id = ?
+	`, label, time.Now(), nodeID)
+
+	if err != nil {
+		return fmt.Errorf("failed to update node label: %w", err)
+	}
+
+	return nil
+}
+
+// HasOperatorTruthHostname checks if the node has an operator-asserted hostname
+func (r *Repository) HasOperatorTruthHostname(ctx context.Context, nodeID string) (bool, error) {
+	var truthJSON sql.NullString
+	err := r.db.QueryRowContext(ctx, `SELECT truth FROM nodes WHERE id = ?`, nodeID).Scan(&truthJSON)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return false, nil
+		}
+		return false, err
+	}
+
+	if !truthJSON.Valid || truthJSON.String == "" {
+		return false, nil
+	}
+
+	var truth domain.NodeTruth
+	if err := json.Unmarshal([]byte(truthJSON.String), &truth); err != nil {
+		return false, nil
+	}
+
+	// Check if hostname is in truth properties
+	if truth.Properties != nil {
+		if _, hasHostname := truth.Properties["hostname"]; hasHostname {
+			return true, nil
+		}
+		// Also check for label truth
+		if _, hasLabel := truth.Properties["label"]; hasLabel {
+			return true, nil
+		}
+	}
+
+	return false, nil
+}
+
 // ClearGraph removes all nodes, edges, and positions from the database
 func (r *Repository) ClearGraph(ctx context.Context) error {
 	tx, err := r.db.BeginTx(ctx, nil)

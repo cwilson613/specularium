@@ -173,25 +173,84 @@ all:
 
     <!-- Node Detail / Truth Modal -->
     <div class="modal-overlay" id="node-detail-modal">
-        <div class="modal">
+        <div class="modal modal-wide">
             <div class="modal-header">
                 <h2 class="modal-title" id="node-detail-title">&gt; NODE DETAIL</h2>
                 <button class="modal-close" id="node-detail-close">&times;</button>
             </div>
             <div class="modal-body">
-                <div id="node-detail-content">
-                    <!-- Node info populated by JS -->
+                <!-- Status Bar -->
+                <div class="node-status-bar" id="node-status-bar">
+                    <!-- Status info populated by JS -->
                 </div>
-                <div class="truth-section">
-                    <h3 class="truth-section-title">OPERATOR TRUTH</h3>
-                    <p class="truth-hint">Lock properties as authoritative source of record. Discrepancies will be flagged when discovered values differ.</p>
-                    <div id="truth-properties">
+
+                <!-- Existence Section -->
+                <div class="modal-section">
+                    <h3 class="section-title">EXISTENCE</h3>
+                    <p class="section-hint">Assert whether this node should exist in the network</p>
+                    <div class="existence-options" id="existence-options">
+                        <label class="existence-option">
+                            <input type="radio" name="existence" value="expected">
+                            <span class="existence-label">EXPECTED</span>
+                            <span class="existence-desc">Node should be reachable</span>
+                        </label>
+                        <label class="existence-option">
+                            <input type="radio" name="existence" value="retired">
+                            <span class="existence-label">RETIRED</span>
+                            <span class="existence-desc">Node should be offline</span>
+                        </label>
+                        <label class="existence-option">
+                            <input type="radio" name="existence" value="temporary">
+                            <span class="existence-label">TEMPORARY</span>
+                            <span class="existence-desc">May come and go</span>
+                        </label>
+                        <label class="existence-option">
+                            <input type="radio" name="existence" value="">
+                            <span class="existence-label">NONE</span>
+                            <span class="existence-desc">No assertion</span>
+                        </label>
+                    </div>
+                </div>
+
+                <!-- Identity Section -->
+                <div class="modal-section">
+                    <h3 class="section-title">IDENTITY</h3>
+                    <div id="node-identity-content">
+                        <!-- Identity info populated by JS -->
+                    </div>
+                </div>
+
+                <!-- Network Section -->
+                <div class="modal-section">
+                    <h3 class="section-title">NETWORK</h3>
+                    <div id="node-network-content">
+                        <!-- Network info populated by JS -->
+                    </div>
+                </div>
+
+                <!-- Hostname Inference Section -->
+                <div class="modal-section" id="hostname-inference-section" style="display: none;">
+                    <h3 class="section-title">HOSTNAME INFERENCE</h3>
+                    <div id="hostname-inference-content">
+                        <!-- Hostname candidates populated by JS -->
+                    </div>
+                </div>
+
+                <!-- Truth Locks Section -->
+                <div class="modal-section collapsible">
+                    <h3 class="section-title section-toggle" id="truth-section-toggle">
+                        TRUTH LOCKS <span class="toggle-icon">▼</span>
+                    </h3>
+                    <p class="section-hint">Lock additional properties as authoritative. Heresy flagged when discovered values differ from the Omnissiah's truth.</p>
+                    <div class="section-content" id="truth-properties">
                         <!-- Truth property inputs populated by JS -->
                     </div>
-                    <div class="truth-actions">
-                        <button class="header-button" id="set-truth-btn">LOCK AS TRUTH</button>
-                        <button class="header-button header-button-danger" id="clear-truth-btn">CLEAR TRUTH</button>
-                    </div>
+                </div>
+
+                <!-- Actions -->
+                <div class="modal-actions">
+                    <button class="header-button" id="set-truth-btn">SAVE TRUTH</button>
+                    <button class="header-button header-button-danger" id="clear-truth-btn">CLEAR ALL</button>
                 </div>
             </div>
         </div>
@@ -200,7 +259,7 @@ all:
     <!-- Discrepancy Panel -->
     <div class="discrepancy-panel collapsed hidden" id="discrepancy-panel">
         <div class="discrepancy-panel-header" id="discrepancy-panel-toggle">
-            <span class="discrepancy-panel-title">DISCREPANCIES</span>
+            <span class="discrepancy-panel-title">HERESY DETECTED</span>
             <span class="discrepancy-panel-badge" id="discrepancy-badge"></span>
             <button class="discrepancy-panel-expand" id="discrepancy-panel-expand">
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -209,7 +268,7 @@ all:
             </button>
         </div>
         <div class="discrepancy-panel-content" id="discrepancy-content">
-            <div class="discrepancy-empty">No discrepancies</div>
+            <div class="discrepancy-empty">No heresy detected. The Omnissiah is pleased.</div>
         </div>
     </div>
 

@@ -4,6 +4,7 @@ import (
 	"context"
 	"embed"
 	"flag"
+	"fmt"
 	"io/fs"
 	"log"
 	"net/http"
@@ -63,7 +64,26 @@ func main() {
 	// Initialize adapter registry with reconcile function
 	adapterRegistry := adapter.NewRegistry(func(ctx context.Context, source string, fragment *domain.GraphFragment) error {
 		// Reconcile verification results - update node status/discovered fields
+		// Only emit events for nodes that actually changed to avoid physics reset
+		changedCount := 0
 		for _, node := range fragment.Nodes {
+			// Get existing node to compare
+			existing, _ := repo.GetNode(ctx, node.ID)
+			if existing == nil {
+				// Node doesn't exist (shouldn't happen for verifier, but handle it)
+				log.Printf("Node %s not found during verification reconcile", node.ID)
+				continue
+			}
+
+			// Check if verification data actually changed
+			statusChanged := existing.Status != node.Status
+			discoveredChanged := !discoveredEqual(existing.Discovered, node.Discovered)
+
+			if !statusChanged && !discoveredChanged {
+				// No changes, skip update and event
+				continue
+			}
+
 			// Update verification status
 			if err := repo.UpdateNodeVerification(ctx, node.ID, node.Status, node.LastVerified, node.LastSeen, node.Discovered); err != nil {
 				log.Printf("Failed to update verification for %s: %v", node.ID, err)
@@ -78,12 +98,48 @@ func main() {
 			} else if len(discrepancies) > 0 {
 				log.Printf("Node %s has %d new discrepancies with operator truth", node.ID, len(discrepancies))
 			}
+
+			// Auto-update label from hostname inference if no operator truth
+			labelUpdated := false
+			if inference := extractHostnameInference(node.Discovered); inference != nil && inference.Best != nil {
+				// Check if operator has set hostname/label truth
+				hasOperatorHostname, _ := repo.HasOperatorTruthHostname(ctx, node.ID)
+				if !hasOperatorHostname {
+					// Use best inferred hostname as label (short name)
+					newLabel := domain.ExtractShortName(inference.Best.Hostname)
+					if newLabel != "" && newLabel != existing.Label {
+						if err := repo.UpdateNodeLabel(ctx, node.ID, newLabel); err != nil {
+							log.Printf("Failed to update label for %s: %v", node.ID, err)
+						} else {
+							log.Printf("Auto-updated label for %s: %s -> %s (confidence: %.0f%%, source: %s)",
+								node.ID, existing.Label, newLabel,
+								inference.Best.Confidence*100, inference.Best.Source)
+							labelUpdated = true
+						}
+					}
+				}
+			}
+
+			// Fetch the updated node with all fields for the event payload
+			updatedNode, err := repo.GetNode(ctx, node.ID)
+			if err != nil {
+				log.Printf("Failed to fetch updated node %s: %v", node.ID, err)
+				continue
+			}
+
+			// Emit node-updated event with full node data for incremental UI update
+			eventBus.Publish(service.Event{
+				Type:    service.EventNodeUpdated,
+				Payload: updatedNode,
+			})
+			changedCount++
+			_ = labelUpdated // Used for logging above
 		}
-		// Broadcast update event
-		eventBus.Publish(service.Event{
-			Type:    service.EventGraphUpdated,
-			Payload: map[string]int{"nodes_verified": len(fragment.Nodes)},
-		})
+
+		if changedCount > 0 {
+			log.Printf("Reconciled %d changed nodes from %s", changedCount, source)
+		}
+		// Don't emit graph-updated - individual node-updated events handle UI updates
 		return nil
 	})
 
@@ -290,4 +346,105 @@ func (s *scannerService) ScanSubnet(ctx context.Context, cidr string) error {
 	})
 
 	return nil
+}
+
+// discoveredEqual compares two discovered maps for equality
+// Returns true if both maps have the same keys and values
+func discoveredEqual(a, b map[string]any) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for k, va := range a {
+		vb, ok := b[k]
+		if !ok {
+			return false
+		}
+		// Compare values - handle common types
+		switch va := va.(type) {
+		case int64:
+			if vb, ok := vb.(int64); !ok || va != vb {
+				return false
+			}
+		case float64:
+			if vb, ok := vb.(float64); !ok || va != vb {
+				return false
+			}
+		case string:
+			if vb, ok := vb.(string); !ok || va != vb {
+				return false
+			}
+		case bool:
+			if vb, ok := vb.(bool); !ok || va != vb {
+				return false
+			}
+		default:
+			// For complex types (slices, maps), use fmt.Sprintf comparison
+			if fmt.Sprintf("%v", va) != fmt.Sprintf("%v", vb) {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// extractHostnameInference extracts HostnameInference from discovered map
+func extractHostnameInference(discovered map[string]any) *domain.HostnameInference {
+	if discovered == nil {
+		return nil
+	}
+	raw, ok := discovered["hostname_inference"]
+	if !ok {
+		return nil
+	}
+
+	// Handle both direct struct and map[string]interface{} (from JSON)
+	switch v := raw.(type) {
+	case domain.HostnameInference:
+		return &v
+	case *domain.HostnameInference:
+		return v
+	case map[string]interface{}:
+		// Reconstruct from map (when loaded from JSON/DB)
+		inference := &domain.HostnameInference{}
+
+		if candidates, ok := v["candidates"].([]interface{}); ok {
+			for _, c := range candidates {
+				if cm, ok := c.(map[string]interface{}); ok {
+					candidate := domain.HostnameCandidate{
+						Hostname:   getStringField(cm, "hostname"),
+						Confidence: getFloatField(cm, "confidence"),
+						Source:     domain.ConfidenceSource(getStringField(cm, "source")),
+					}
+					inference.Candidates = append(inference.Candidates, candidate)
+				}
+			}
+		}
+
+		if best, ok := v["best"].(map[string]interface{}); ok {
+			inference.Best = &domain.HostnameCandidate{
+				Hostname:   getStringField(best, "hostname"),
+				Confidence: getFloatField(best, "confidence"),
+				Source:     domain.ConfidenceSource(getStringField(best, "source")),
+			}
+		}
+
+		return inference
+	}
+	return nil
+}
+
+// getStringField safely extracts a string field from a map
+func getStringField(m map[string]interface{}, key string) string {
+	if v, ok := m[key].(string); ok {
+		return v
+	}
+	return ""
+}
+
+// getFloatField safely extracts a float64 field from a map
+func getFloatField(m map[string]interface{}, key string) float64 {
+	if v, ok := m[key].(float64); ok {
+		return v
+	}
+	return 0
 }

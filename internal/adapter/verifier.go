@@ -99,7 +99,7 @@ func DefaultVerifierConfig() VerifierConfig {
 		PingTimeout:      3 * time.Second,
 		PortTimeout:      2 * time.Second,
 		BannerTimeout:    2 * time.Second,
-		CommonPorts:      []int{22, 80, 443, 53, 8080, 8443, 3389, 5900},
+		CommonPorts:      []int{22, 25, 80, 443, 53, 8080, 8443, 3389, 5900},
 		MaxConcurrent:    10,
 		VerifyInterval:   5 * time.Minute,
 		EnableICMP:       true,
@@ -535,6 +535,67 @@ func (v *VerifierAdapter) grabBanner(conn net.Conn, port int) string {
 	return banner
 }
 
+// extractHostnameFromSMTPBanner parses SMTP banner for hostname
+// Format: "220 hostname.domain.tld ESMTP ..."
+func extractHostnameFromSMTPBanner(banner string) string {
+	if banner == "" {
+		return ""
+	}
+	// SMTP banners typically start with "220 hostname ..."
+	if !strings.HasPrefix(banner, "220 ") {
+		return ""
+	}
+	parts := strings.Fields(banner)
+	if len(parts) < 2 {
+		return ""
+	}
+	hostname := parts[1]
+	// Validate it looks like a hostname (contains at least one dot or is alphanumeric)
+	if strings.Contains(hostname, ".") || isValidHostname(hostname) {
+		return strings.ToLower(hostname)
+	}
+	return ""
+}
+
+// extractHostnameFromSSHBanner parses SSH banner for hostname hints
+// Format: "SSH-2.0-OpenSSH_8.9p1 Ubuntu-3ubuntu0.13" (usually no hostname)
+// Some custom configs include hostname in comments
+func extractHostnameFromSSHBanner(banner string) string {
+	if banner == "" {
+		return ""
+	}
+	// SSH banners rarely contain hostnames, but check for common patterns
+	// Some servers include hostname after version string
+	// Example: "SSH-2.0-OpenSSH_8.9 hostname.domain.tld"
+	parts := strings.Fields(banner)
+	for _, part := range parts {
+		// Look for FQDN patterns (word.word.word)
+		if strings.Count(part, ".") >= 2 && isValidHostname(part) {
+			return strings.ToLower(part)
+		}
+	}
+	return ""
+}
+
+// isValidHostname checks if a string looks like a valid hostname
+func isValidHostname(s string) bool {
+	if len(s) == 0 || len(s) > 255 {
+		return false
+	}
+	// Must not be an IP address
+	if net.ParseIP(s) != nil {
+		return false
+	}
+	// Basic validation: alphanumeric, hyphens, dots
+	for _, c := range s {
+		if !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+			(c >= '0' && c <= '9') || c == '-' || c == '.') {
+			return false
+		}
+	}
+	return true
+}
+
 // resultToNode converts a probe result to a node with updated fields
 func (v *VerifierAdapter) resultToNode(result ProbeResult) domain.Node {
 	now := result.VerifiedAt
@@ -575,5 +636,37 @@ func (v *VerifierAdapter) resultToNode(result ProbeResult) domain.Node {
 		node.SetDiscovered("last_error", result.Error)
 	}
 
+	// Build hostname inference from all available sources
+	inference := v.buildHostnameInference(result, now)
+	if len(inference.Candidates) > 0 {
+		node.SetDiscovered("hostname_inference", inference)
+	}
+
 	return node
+}
+
+// buildHostnameInference gathers hostname candidates from all sources
+func (v *VerifierAdapter) buildHostnameInference(result ProbeResult, now time.Time) domain.HostnameInference {
+	inference := domain.HostnameInference{}
+
+	// Source 1: Reverse DNS (PTR record) - highest confidence
+	if result.Hostname != "" {
+		inference.AddCandidate(result.Hostname, domain.SourcePTR, now)
+	}
+
+	// Source 2-N: Service banners
+	for _, svc := range result.PortDetails {
+		switch svc.Service {
+		case "smtp":
+			if hostname := extractHostnameFromSMTPBanner(svc.Banner); hostname != "" {
+				inference.AddCandidate(hostname, domain.SourceSMTPBanner, now)
+			}
+		case "ssh":
+			if hostname := extractHostnameFromSSHBanner(svc.Banner); hostname != "" {
+				inference.AddCandidate(hostname, domain.SourceSSHBanner, now)
+			}
+		}
+	}
+
+	return inference
 }
