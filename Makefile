@@ -20,5 +20,7 @@ clean:
 docker:
 	docker build -t $(IMAGE) .
 
-push: docker
+docker-push: docker
 	docker push $(IMAGE)
+
+push: docker-push

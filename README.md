@@ -1,39 +1,41 @@
-# netdiagram-go
+# Specularium
 
 A Go-based network topology visualization tool for the Vanderlyn homelab infrastructure.
 
-**Live**: https://netdiagram.vanderlyn.house
+**Live**: https://specularium.vanderlyn.house
 
 ## Features
 
-- **SQLite persistence** - Hosts, connections, and layout positions stored locally
-- **YAML import** - Reads infrastructure.yml generated from Ansible inventory
+- **SQLite persistence** - Nodes, edges, and layout positions stored locally
+- **Import/Export** - Ansible inventory, YAML, and JSON formats
 - **Real-time updates** - Server-Sent Events (SSE) for live topology changes
-- **File watching** - Auto-reload when infrastructure.yml changes (with debouncing)
+- **Network scanning** - Subnet discovery with port scanning and service detection
+- **Truth assertions** - Lock expected values and detect discrepancies
+- **Verification adapters** - Automated reachability checking and status tracking
 - **Interactive graph** - vis-network visualization with drag-and-drop positioning
 - **Position persistence** - Save node positions to maintain consistent layouts
 - **Single binary** - Embedded static assets via `//go:embed`, no external dependencies
-- **CRT terminal theme** - Retro green phosphor aesthetic
+- **40K Mechanicus theme** - Dark gothic industrial CRT terminal aesthetic
 
 ## Architecture
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│                    netdiagram-go                            │
+│                    Specularium                              │
 ├─────────────────────────────────────────────────────────────┤
 │  cmd/server/                                                │
 │  ├── main.go          Entry point, wires components        │
 │  └── web/             Embedded static assets (HTML/CSS/JS) │
 ├─────────────────────────────────────────────────────────────┤
 │  internal/                                                  │
-│  ├── domain/          Core types: Host, Connection, Graph  │
+│  ├── domain/          Core types: Node, Edge, Graph        │
 │  ├── repository/      Data access interface                │
 │  │   └── sqlite/      SQLite implementation                │
-│  ├── loader/          YAML file parser                     │
-│  ├── service/         Business logic, caching              │
+│  ├── adapter/         Discovery and verification adapters  │
+│  ├── codec/           Import/export format codecs          │
+│  ├── service/         Business logic, event bus            │
 │  ├── handler/         HTTP API handlers                    │
-│  ├── hub/             SSE connection manager               │
-│  └── watcher/         fsnotify file watcher                │
+│  └── hub/             SSE connection manager               │
 └─────────────────────────────────────────────────────────────┘
 ```
 
@@ -45,27 +47,25 @@ A Go-based network topology visualization tool for the Vanderlyn homelab infrast
 # Build (requires CGO for SQLite)
 make build
 
-# Run with sample data
-./netdiagram -addr :3000 -db ./netdiagram.db -yaml examples/infrastructure.yml
+# Run locally
+./specularium -addr :3000 -db ./specularium.db
 
 # Or use make target
-make dev
+make run
 ```
 
 ### Docker
 
 ```bash
-# Build image
-docker build -t netdiagram-go:latest .
+# Build and push image
+make docker-push
 
 # Run container
 docker run -d \
-  --name netdiagram \
+  --name specularium \
   -p 3000:3000 \
   -v $(pwd)/data:/data \
-  -v $(pwd)/infrastructure.yml:/config/infrastructure.yml \
-  netdiagram-go:latest \
-  -yaml /config/infrastructure.yml
+  cwilson613/specularium:latest
 ```
 
 ## Deployment (K8s)
@@ -73,19 +73,21 @@ docker run -d \
 The application is deployed to the Vanderlyn K3s cluster:
 
 ```bash
-# Update infrastructure data from Ansible inventory
-ansible-playbook ansible/playbooks/update-network-diagram.yml
+# Build and push new image
+make docker-push
 
-# Manual deployment (if needed)
-kubectl apply -f ../k8s/manifests/netdiagram-go/ --kubeconfig ~/.kube/config-brutus
+# Deploy to cluster
+kubectl apply -f ../k8s/manifests/specularium/ --kubeconfig ~/.kube/config-brutus
+
+# Or restart to pull latest
+kubectl rollout restart deployment/specularium -n default --kubeconfig ~/.kube/config-brutus
 ```
 
 **K8s Resources:**
-- Deployment: `netdiagram-go` (1 replica, Recreate strategy for SQLite)
-- Service: `netdiagram-go` (ClusterIP, port 80 -> 3000)
-- Ingress: `netdiagram.vanderlyn.house` (Traefik, TLS via cert-manager)
-- ConfigMap: `netdiagram-go-config` (infrastructure.yml)
-- PVC: `netdiagram-go-data` (1Gi, SQLite database)
+- Deployment: `specularium` (1 replica, Recreate strategy for SQLite)
+- Service: `specularium` (ClusterIP, port 80 -> 3000)
+- Ingress: `specularium.vanderlyn.house` (Traefik, TLS via cert-manager)
+- PVC: `specularium-data` (1Gi, SQLite database)
 
 ## API Reference
 
@@ -96,34 +98,63 @@ kubectl apply -f ../k8s/manifests/netdiagram-go/ --kubeconfig ~/.kube/config-bru
 | `GET` | `/api/graph` | Graph data for vis-network (nodes + edges) |
 | `GET` | `/events` | SSE stream for real-time updates |
 
-### Infrastructure CRUD
+### Node CRUD
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| `GET` | `/api/infrastructure` | Full infrastructure data |
-| `GET` | `/api/hosts/{id}` | Get single host |
-| `POST` | `/api/hosts` | Create host |
-| `PUT` | `/api/hosts/{id}` | Update host |
-| `DELETE` | `/api/hosts/{id}` | Delete host |
-| `POST` | `/api/connections` | Create connection |
-| `DELETE` | `/api/connections/{id}` | Delete connection |
+| `GET` | `/api/nodes` | List all nodes (filter by type/source) |
+| `POST` | `/api/nodes` | Create node |
+| `GET` | `/api/nodes/{id}` | Get single node |
+| `PUT` | `/api/nodes/{id}` | Update node |
+| `DELETE` | `/api/nodes/{id}` | Delete node |
 
-### Persistence & Import
+### Edge CRUD
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| `POST` | `/api/positions` | Save node positions (JSON map) |
-| `GET` | `/api/export` | Export as YAML |
-| `POST` | `/api/import?path=...` | Import from YAML file path |
-| `POST` | `/api/reload` | Force reload from database |
+| `GET` | `/api/edges` | List all edges |
+| `POST` | `/api/edges` | Create edge |
+| `GET` | `/api/edges/{id}` | Get single edge |
+| `PUT` | `/api/edges/{id}` | Update edge |
+| `DELETE` | `/api/edges/{id}` | Delete edge |
+
+### Positions
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `GET` | `/api/positions` | Get all positions |
+| `POST` | `/api/positions` | Bulk save positions |
+| `PUT` | `/api/positions/{node_id}` | Update single position |
+
+### Import/Export
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `POST` | `/api/import/yaml` | Import generic YAML |
+| `POST` | `/api/import/ansible-inventory` | Import Ansible inventory |
+| `POST` | `/api/import/scan` | Network scan (CIDR) |
+| `GET` | `/api/export/json` | Export as JSON |
+| `GET` | `/api/export/yaml` | Export as YAML |
+| `GET` | `/api/export/ansible-inventory` | Export as Ansible inventory |
+
+### Truth & Verification
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `POST` | `/api/discover` | Trigger verification of all nodes |
+| `GET` | `/api/nodes/{id}/truth` | Get truth assertions |
+| `PUT` | `/api/nodes/{id}/truth` | Set truth assertions |
+| `DELETE` | `/api/nodes/{id}/truth` | Clear truth assertions |
+| `GET` | `/api/nodes/{id}/discrepancies` | Get node discrepancies |
+| `GET` | `/api/discrepancies` | List all discrepancies |
+| `POST` | `/api/discrepancies/{id}/resolve` | Resolve discrepancy |
 
 ## Configuration
 
 | Flag | Default | Description |
 |------|---------|-------------|
 | `-addr` | `:3000` | HTTP listen address |
-| `-db` | `./netdiagram.db` | SQLite database path |
-| `-yaml` | (none) | Infrastructure YAML to import and watch |
+| `-db` | `./specularium.db` | SQLite database path |
 
 ## Data Flow
 
@@ -131,17 +162,20 @@ kubectl apply -f ../k8s/manifests/netdiagram-go/ --kubeconfig ~/.kube/config-bru
 Ansible Inventory (hosts.yml)
         │
         ▼
-generate-infrastructure-yaml.py
+Import via API (/api/import/ansible-inventory)
         │
         ▼
-infrastructure.yml (ConfigMap)
+SQLite Database (source of truth)
         │
-        ▼
-netdiagram-go (file watcher)
+        ├──► Verification Adapter (polls nodes)
+        │        │
+        │        └──► Updates status, detects discrepancies
         │
-        ├──► SQLite (hosts, connections, positions)
+        ├──► Scanner Adapter (subnet scans)
+        │        │
+        │        └──► Discovers new nodes
         │
-        └──► SSE Hub ──► Browser clients
+        └──► SSE Hub ──► Browser clients (real-time updates)
 ```
 
 ## Development
@@ -168,52 +202,40 @@ make docker
 
 ### Code Structure
 
-- **domain/**: Pure Go types, no dependencies
-- **repository/**: Interface + SQLite implementation
+- **domain/**: Pure Go types (Node, Edge, Graph, Truth)
+- **repository/**: SQLite implementation with full CRUD
+- **adapter/**: Discovery and verification adapters
+- **codec/**: Import/export format handlers
 - **service/**: Business logic, event publishing
 - **handler/**: HTTP routing, JSON encoding
 - **hub/**: SSE broadcast to connected clients
-- **watcher/**: fsnotify with 500ms debounce
-- **loader/**: YAML parsing to domain types
 
-## Infrastructure YAML Schema
+## Key Features
 
-```yaml
-version: "1.0"
-metadata:
-  network:
-    cidr: "192.168.0.0/24"
-    gateway: "192.168.0.1"
-    domains:
-      internal: "vanderlyn.local"
-      external: "vanderlyn.house"
-  description: "Network Infrastructure"
+### Truth Assertions
+Lock expected values for nodes to detect drift and configuration changes:
+- Define canonical properties (IP, MAC, hostname, etc.)
+- Automatic discrepancy detection when actual values differ
+- Visual indicators in UI (gold borders for asserted, amber for conflicts)
+- Operator-defined "source of truth" for critical infrastructure
 
-groups:
-  k8s_workers:
-    members: [node1, node2]
+### Verification Adapters
+Automated reachability checking and status tracking:
+- Periodic ICMP ping checks
+- TCP port availability verification
+- Latency measurement and trending
+- Automatic status updates (verified, unreachable, degraded)
 
-hosts:
-  router:
-    ip: "192.168.0.1"
-    role: "Router"
-    platform: "edgeos"
-    classification: "device"
-    network:
-      ports:
-        - name: "wan"
-          speed_gbps: 1
-        - name: "lan1"
-          speed_gbps: 2
-          connected_to: "switch:eth0"
+### Network Scanning
+Subnet discovery with detailed host profiling:
+- CIDR range scanning with configurable ports
+- Service detection with banner grabbing
+- MAC address and reverse DNS lookup
+- Integration with truth system for conflict detection
 
-  server1:
-    ip: "192.168.0.10"
-    role: "Application Server"
-    platform: "debian"
-    network:
-      ports:
-        - name: "eth0"
-          speed_gbps: 1
-          connected_to: "router:lan1"
-```
+### Import/Export
+Multiple format support for integration:
+- **Ansible Inventory**: Direct import from Ansible infrastructure
+- **YAML**: Generic structured format
+- **JSON**: API-friendly format
+- All formats support bidirectional conversion

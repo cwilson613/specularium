@@ -1,6 +1,6 @@
 openapi: 3.0.3
 info:
-  title: netdiagram-go API
+  title: Specularium API
   description: |
     Network topology visualization and management API.
 
@@ -10,6 +10,8 @@ info:
     - Export: Transform database contents into various output formats
     - Real-time updates: Server-Sent Events for live topology changes
     - Position persistence: Save and restore node layout positions
+    - Truth assertions: Lock expected values and detect discrepancies
+    - Verification adapters: Automated reachability checking and status tracking
 
     The data model uses flexible nodes and edges with property bags, allowing representation
     of diverse network components (servers, switches, routers, VMs, VIPs, containers, etc.)
@@ -17,7 +19,7 @@ info:
   contact:
     name: Vanderlyn Homelab
 servers:
-  - url: https://netdiagram.vanderlyn.house
+  - url: https://specularium.vanderlyn.house
     description: Production server
   - url: http://localhost:3000
     description: Local development server

@@ -193,12 +193,16 @@ func (h *TruthHandler) GetNodeDiscrepancies(w http.ResponseWriter, r *http.Reque
 func (h *TruthHandler) writeJSON(w http.ResponseWriter, data interface{}, status int) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	json.NewEncoder(w).Encode(data)
+	if err := json.NewEncoder(w).Encode(data); err != nil {
+		log.Printf("Failed to encode JSON response: %v", err)
+	}
 }
 
 // writeError writes an error response
 func (h *TruthHandler) writeError(w http.ResponseWriter, message, details string, status int) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	json.NewEncoder(w).Encode(ErrorResponse{Error: message, Details: details})
+	if err := json.NewEncoder(w).Encode(ErrorResponse{Error: message, Details: details}); err != nil {
+		log.Printf("Failed to encode error response: %v", err)
+	}
 }

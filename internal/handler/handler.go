@@ -141,7 +141,12 @@ func (h *GraphHandler) UpdateNode(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Return updated node
-	node, _ := h.svc.GetNode(r.Context(), id)
+	node, err := h.svc.GetNode(r.Context(), id)
+	if err != nil {
+		log.Printf("Failed to fetch updated node: %v", err)
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
 	h.writeJSON(w, node, http.StatusOK)
 }
 
@@ -246,7 +251,12 @@ func (h *GraphHandler) UpdateEdge(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Return updated edge
-	edge, _ := h.svc.GetEdge(r.Context(), id)
+	edge, err := h.svc.GetEdge(r.Context(), id)
+	if err != nil {
+		log.Printf("Failed to fetch updated edge: %v", err)
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
 	h.writeJSON(w, edge, http.StatusOK)
 }
 
@@ -486,10 +496,12 @@ func (h *GraphHandler) writeJSON(w http.ResponseWriter, data interface{}, status
 func (h *GraphHandler) writeError(w http.ResponseWriter, error, details string, statusCode int) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(statusCode)
-	json.NewEncoder(w).Encode(ErrorResponse{
+	if err := json.NewEncoder(w).Encode(ErrorResponse{
 		Error:   error,
 		Details: details,
-	})
+	}); err != nil {
+		log.Printf("Failed to encode error response: %v", err)
+	}
 }
 
 func extractPathParam(path, prefix string) string {

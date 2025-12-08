@@ -9,6 +9,7 @@
 *.swo
 
 # Build artifacts
+specularium
 netdiagram
 *.db
 *.db-journal
