@@ -12,11 +12,12 @@ import (
 	"syscall"
 	"time"
 
-	"netdiagram/internal/handler"
-	"netdiagram/internal/hub"
-	"netdiagram/internal/repository/sqlite"
-	"netdiagram/internal/service"
-	"netdiagram/internal/watcher"
+	"specularium/internal/adapter"
+	"specularium/internal/domain"
+	"specularium/internal/handler"
+	"specularium/internal/hub"
+	"specularium/internal/repository/sqlite"
+	"specularium/internal/service"
 )
 
 //go:embed web/*
@@ -25,12 +26,11 @@ var webFS embed.FS
 func main() {
 	// Command line flags
 	addr := flag.String("addr", ":3000", "HTTP listen address")
-	dbPath := flag.String("db", "./netdiagram.db", "SQLite database path")
-	yamlPath := flag.String("yaml", "", "Path to infrastructure.yml to import on startup and watch")
+	dbPath := flag.String("db", "./specularium.db", "SQLite database path")
 	flag.Parse()
 
 	log.SetFlags(log.LstdFlags | log.Lshortfile)
-	log.Println("Starting Network Diagram server...")
+	log.Println("Starting Specularium server...")
 
 	// Initialize SQLite repository
 	repo, err := sqlite.New(*dbPath)
@@ -57,38 +57,128 @@ func main() {
 	}()
 
 	// Initialize services
-	infraSvc := service.NewInfrastructureService(repo, eventBus)
+	graphSvc := service.NewGraphService(repo, eventBus)
+	truthSvc := service.NewTruthService(repo, eventBus)
 
-	// Import YAML if specified
-	if *yamlPath != "" {
-		log.Printf("Importing infrastructure from: %s", *yamlPath)
-		if err := infraSvc.ImportFromYAML(context.Background(), *yamlPath); err != nil {
-			log.Printf("Warning: Failed to import YAML: %v", err)
-		} else {
-			log.Println("Infrastructure imported successfully")
+	// Initialize adapter registry with reconcile function
+	adapterRegistry := adapter.NewRegistry(func(ctx context.Context, source string, fragment *domain.GraphFragment) error {
+		// Reconcile verification results - update node status/discovered fields
+		for _, node := range fragment.Nodes {
+			// Update verification status
+			if err := repo.UpdateNodeVerification(ctx, node.ID, node.Status, node.LastVerified, node.LastSeen, node.Discovered); err != nil {
+				log.Printf("Failed to update verification for %s: %v", node.ID, err)
+				continue
+			}
+
+			// Check for discrepancies against operator truth
+			// This compares discovered values with truth assertions
+			discrepancies, err := truthSvc.CheckDiscrepancies(ctx, node.ID, node.Discovered, source)
+			if err != nil {
+				log.Printf("Failed to check discrepancies for %s: %v", node.ID, err)
+			} else if len(discrepancies) > 0 {
+				log.Printf("Node %s has %d new discrepancies with operator truth", node.ID, len(discrepancies))
+			}
 		}
+		// Broadcast update event
+		eventBus.Publish(service.Event{
+			Type:    service.EventGraphUpdated,
+			Payload: map[string]int{"nodes_verified": len(fragment.Nodes)},
+		})
+		return nil
+	})
+
+	// Set up discovery event handler to broadcast to SSE
+	adapterRegistry.SetDiscoveryEventHandler(func(eventType string, payload interface{}) {
+		eventBus.Publish(service.Event{
+			Type:    service.EventType(eventType),
+			Payload: payload,
+		})
+	})
+
+	// Register verifier adapter
+	verifierConfig := adapter.DefaultVerifierConfig()
+	verifierAdapter := adapter.NewVerifierAdapter(repo, verifierConfig)
+	adapterRegistry.Register(verifierAdapter, adapter.AdapterConfig{
+		Enabled:      true,
+		Priority:     50,
+		PollInterval: "30s", // Verify nodes every 30 seconds
+	})
+
+	// Create scanner adapter with service wrapper
+	scannerConfig := adapter.DefaultScannerConfig()
+	scannerAdapter := adapter.NewScannerAdapter(scannerConfig)
+
+	// Create scanner service that saves discovered hosts
+	scannerSvc := &scannerService{
+		scanner:  scannerAdapter,
+		repo:     repo,
+		eventBus: eventBus,
+	}
+	// Connect scanner to event bus for progress updates
+	scannerAdapter.SetEventPublisher(adapterRegistry)
+
+	// Start adapter registry
+	adapterCtx, adapterCancel := context.WithCancel(context.Background())
+	if err := adapterRegistry.Start(adapterCtx); err != nil {
+		log.Printf("Warning: Failed to start adapter registry: %v", err)
 	}
 
 	// Initialize HTTP handlers
-	apiHandler := handler.NewAPIHandler(infraSvc)
+	graphHandler := handler.NewGraphHandler(graphSvc)
+	graphHandler.SetDiscoveryTrigger(adapterRegistry)
+	graphHandler.SetSubnetScanner(scannerSvc)
+	truthHandler := handler.NewTruthHandler(truthSvc)
 
 	// Setup routes
 	mux := http.NewServeMux()
 
-	// API routes
-	mux.HandleFunc("GET /api/graph", apiHandler.GetGraph)
-	mux.HandleFunc("GET /api/infrastructure", apiHandler.GetInfrastructure)
-	mux.HandleFunc("GET /api/hosts/{id}", apiHandler.GetHost)
-	mux.HandleFunc("POST /api/hosts", apiHandler.CreateHost)
-	mux.HandleFunc("PUT /api/hosts/{id}", apiHandler.UpdateHost)
-	mux.HandleFunc("DELETE /api/hosts/{id}", apiHandler.DeleteHost)
-	mux.HandleFunc("POST /api/connections", apiHandler.CreateConnection)
-	mux.HandleFunc("DELETE /api/connections/{id}", apiHandler.DeleteConnection)
-	mux.HandleFunc("POST /api/positions", apiHandler.SavePositions)
-	mux.HandleFunc("GET /api/export", apiHandler.ExportYAML)
-	mux.HandleFunc("POST /api/import", apiHandler.ImportYAML)
-	mux.HandleFunc("POST /api/reload", apiHandler.Reload)
-	mux.Handle("GET /api/events", sseHub)
+	// Graph endpoint (complete graph with positions)
+	mux.HandleFunc("GET /api/graph", graphHandler.GetGraph)
+	mux.HandleFunc("DELETE /api/graph", graphHandler.ClearGraph)
+	mux.HandleFunc("POST /api/discover", graphHandler.TriggerDiscovery)
+
+	// Node endpoints
+	mux.HandleFunc("GET /api/nodes", graphHandler.ListNodes)
+	mux.HandleFunc("POST /api/nodes", graphHandler.CreateNode)
+	mux.HandleFunc("GET /api/nodes/{id}", graphHandler.GetNode)
+	mux.HandleFunc("PUT /api/nodes/{id}", graphHandler.UpdateNode)
+	mux.HandleFunc("DELETE /api/nodes/{id}", graphHandler.DeleteNode)
+
+	// Edge endpoints
+	mux.HandleFunc("GET /api/edges", graphHandler.ListEdges)
+	mux.HandleFunc("POST /api/edges", graphHandler.CreateEdge)
+	mux.HandleFunc("GET /api/edges/{id}", graphHandler.GetEdge)
+	mux.HandleFunc("PUT /api/edges/{id}", graphHandler.UpdateEdge)
+	mux.HandleFunc("DELETE /api/edges/{id}", graphHandler.DeleteEdge)
+
+	// Position endpoints
+	mux.HandleFunc("GET /api/positions", graphHandler.GetPositions)
+	mux.HandleFunc("POST /api/positions", graphHandler.SavePositions)
+	mux.HandleFunc("PUT /api/positions/{node_id}", graphHandler.UpdatePosition)
+
+	// Import endpoints
+	mux.HandleFunc("POST /api/import/yaml", graphHandler.ImportYAML)
+	mux.HandleFunc("POST /api/import/ansible-inventory", graphHandler.ImportAnsibleInventory)
+	mux.HandleFunc("POST /api/import/scan", graphHandler.ImportScan)
+
+	// Export endpoints
+	mux.HandleFunc("GET /api/export/json", graphHandler.ExportJSON)
+	mux.HandleFunc("GET /api/export/yaml", graphHandler.ExportYAML)
+	mux.HandleFunc("GET /api/export/ansible-inventory", graphHandler.ExportAnsibleInventory)
+
+	// Truth endpoints
+	mux.HandleFunc("GET /api/nodes/{id}/truth", truthHandler.GetNodeTruth)
+	mux.HandleFunc("PUT /api/nodes/{id}/truth", truthHandler.SetNodeTruth)
+	mux.HandleFunc("DELETE /api/nodes/{id}/truth", truthHandler.ClearNodeTruth)
+	mux.HandleFunc("GET /api/nodes/{id}/discrepancies", truthHandler.GetNodeDiscrepancies)
+
+	// Discrepancy endpoints
+	mux.HandleFunc("GET /api/discrepancies", truthHandler.ListDiscrepancies)
+	mux.HandleFunc("GET /api/discrepancies/{id}", truthHandler.GetDiscrepancy)
+	mux.HandleFunc("POST /api/discrepancies/{id}/resolve", truthHandler.ResolveDiscrepancy)
+
+	// SSE events endpoint
+	mux.Handle("GET /events", sseHub)
 
 	// Static files from embedded filesystem
 	webContent, err := fs.Sub(webFS, "web")
@@ -113,28 +203,6 @@ func main() {
 		IdleTimeout:  60 * time.Second,
 	}
 
-	// Start file watcher if YAML path specified
-	var watcherCancel context.CancelFunc
-	if *yamlPath != "" {
-		var watcherCtx context.Context
-		watcherCtx, watcherCancel = context.WithCancel(context.Background())
-
-		w := watcher.New(*yamlPath, func() {
-			log.Println("Infrastructure file changed, reloading...")
-			if err := infraSvc.ImportFromYAML(context.Background(), *yamlPath); err != nil {
-				log.Printf("Failed to reload YAML: %v", err)
-			} else {
-				log.Println("Infrastructure reloaded successfully")
-			}
-		})
-
-		go func() {
-			if err := w.Watch(watcherCtx); err != nil && err != context.Canceled {
-				log.Printf("Watcher error: %v", err)
-			}
-		}()
-	}
-
 	// Start server in goroutine
 	go func() {
 		log.Printf("Server listening on %s", *addr)
@@ -150,9 +218,10 @@ func main() {
 
 	log.Println("Shutting down server...")
 
-	// Cancel watcher
-	if watcherCancel != nil {
-		watcherCancel()
+	// Stop adapter registry
+	adapterCancel()
+	if err := adapterRegistry.Stop(); err != nil {
+		log.Printf("Adapter registry shutdown error: %v", err)
 	}
 
 	// Graceful shutdown with timeout
@@ -164,4 +233,61 @@ func main() {
 	}
 
 	log.Println("Server stopped")
+}
+
+// scannerService wraps the scanner adapter and saves discovered hosts
+type scannerService struct {
+	scanner  *adapter.ScannerAdapter
+	repo     *sqlite.Repository
+	eventBus *service.EventBus
+}
+
+// ScanSubnet scans a CIDR range and saves discovered hosts
+func (s *scannerService) ScanSubnet(ctx context.Context, cidr string) error {
+	log.Printf("scannerService: Starting scan of %s", cidr)
+	fragment, err := s.scanner.ScanSubnet(ctx, cidr)
+	if err != nil {
+		log.Printf("scannerService: Scan error: %v", err)
+		return err
+	}
+
+	if fragment == nil {
+		log.Printf("scannerService: Scan returned nil fragment")
+		return nil
+	}
+
+	log.Printf("scannerService: Received fragment with %d nodes", len(fragment.Nodes))
+
+	// Save discovered nodes to repository
+	created := 0
+	updated := 0
+	for _, node := range fragment.Nodes {
+		// Check if node already exists
+		existing, _ := s.repo.GetNode(ctx, node.ID)
+		if existing != nil {
+			// Update existing node with discovered data
+			if err := s.repo.UpdateNodeVerification(ctx, node.ID, node.Status, node.LastVerified, node.LastSeen, node.Discovered); err != nil {
+				log.Printf("Failed to update discovered node %s: %v", node.ID, err)
+			} else {
+				updated++
+			}
+		} else {
+			// Create new node
+			if err := s.repo.CreateNode(ctx, &node); err != nil {
+				log.Printf("Failed to create discovered node %s: %v", node.ID, err)
+			} else {
+				created++
+			}
+		}
+	}
+
+	log.Printf("scannerService: Created %d nodes, updated %d nodes", created, updated)
+
+	// Broadcast graph update
+	s.eventBus.Publish(service.Event{
+		Type:    service.EventGraphUpdated,
+		Payload: map[string]int{"nodes_discovered": len(fragment.Nodes)},
+	})
+
+	return nil
 }

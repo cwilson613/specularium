@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Network Infrastructure</title>
+    <title>Specularium</title>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=VT323&display=swap" rel="stylesheet">
@@ -16,28 +16,75 @@
     <header class="header">
         <div class="header-content">
             <div class="title-section">
-                <h1 class="title">NETWORK INFRASTRUCTURE</h1>
-                <p class="subtitle">&gt; MACHINE SPIRIT TOPOLOGY VISUALIZATION</p>
+                <h1 class="title">SPECULARIUM</h1>
+                <div class="stats-inline">
+                    <span class="stat-inline"><span id="node-count">--</span> NODES</span>
+                    <span class="stat-sep">|</span>
+                    <span class="stat-inline"><span id="edge-count">--</span> LINKS</span>
+                </div>
             </div>
             <div class="header-right">
-                <button class="refresh-button" id="refresh-btn" title="Refresh network data">
-                    <svg class="refresh-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                        <path d="M21 2v6h-6M3 12a9 9 0 0 1 15-6.7L21 8M3 22v-6h6M21 12a9 9 0 0 1-15 6.7L3 16"/>
-                    </svg>
-                    <span class="refresh-label">REFRESH</span>
-                </button>
-                <div class="stats" id="stats">
-                    <div class="stat-item">
-                        <span class="stat-value" id="node-count">--</span>
-                        <span class="stat-label">[NODES]</span>
-                    </div>
-                    <div class="stat-item">
-                        <span class="stat-value" id="edge-count">--</span>
-                        <span class="stat-label">[LINKS]</span>
-                    </div>
-                    <div class="stat-item">
-                        <span class="stat-value" id="client-count">01</span>
-                        <span class="stat-label">[CLIENTS]</span>
+                <input type="file" id="import-file" accept=".yml,.yaml" style="display: none;">
+
+                <!-- Actions dropdown -->
+                <div class="dropdown" id="actions-dropdown">
+                    <button class="header-button dropdown-trigger" id="actions-btn">
+                        <svg class="button-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <circle cx="12" cy="12" r="1"/>
+                            <circle cx="12" cy="5" r="1"/>
+                            <circle cx="12" cy="19" r="1"/>
+                        </svg>
+                        <span class="button-label">ACTIONS</span>
+                        <svg class="dropdown-arrow" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <polyline points="6 9 12 15 18 9"/>
+                        </svg>
+                    </button>
+                    <div class="dropdown-menu">
+                        <button class="dropdown-item" id="import-btn">
+                            <svg class="dropdown-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+                                <polyline points="17 8 12 3 7 8"/>
+                                <line x1="12" y1="3" x2="12" y2="15"/>
+                            </svg>
+                            Import File
+                        </button>
+                        <button class="dropdown-item" id="paste-btn">
+                            <svg class="dropdown-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/>
+                                <rect x="8" y="2" width="8" height="4" rx="1" ry="1"/>
+                            </svg>
+                            Paste YAML
+                        </button>
+                        <div class="dropdown-divider"></div>
+                        <button class="dropdown-item" id="discover-btn">
+                            <svg class="dropdown-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <circle cx="11" cy="11" r="8"/>
+                                <path d="M21 21l-4.35-4.35"/>
+                            </svg>
+                            Verify Nodes
+                        </button>
+                        <button class="dropdown-item" id="scan-btn">
+                            <svg class="dropdown-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <rect x="2" y="2" width="20" height="20" rx="2"/>
+                                <path d="M9 9h6v6H9z"/>
+                                <path d="M9 2v4M15 2v4M9 18v4M15 18v4M2 9h4M2 15h4M18 9h4M18 15h4"/>
+                            </svg>
+                            Scan Network
+                        </button>
+                        <button class="dropdown-item" id="refresh-btn">
+                            <svg class="dropdown-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <path d="M21 2v6h-6M3 12a9 9 0 0 1 15-6.7L21 8M3 22v-6h6M21 12a9 9 0 0 1-15 6.7L3 16"/>
+                            </svg>
+                            Refresh
+                        </button>
+                        <div class="dropdown-divider"></div>
+                        <button class="dropdown-item dropdown-item-danger" id="clear-btn">
+                            <svg class="dropdown-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <polyline points="3 6 5 6 21 6"/>
+                                <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>
+                            </svg>
+                            Clear All
+                        </button>
                     </div>
                 </div>
             </div>
@@ -47,6 +94,27 @@
     <main class="main-container">
         <div class="diagram-wrapper">
             <div id="network-container"></div>
+        </div>
+        <div class="zoom-controls" id="zoom-controls">
+            <button class="zoom-btn" id="zoom-in" title="Zoom In">+</button>
+            <span class="zoom-level" id="zoom-level">100%</span>
+            <button class="zoom-btn" id="zoom-out" title="Zoom Out">−</button>
+            <button class="zoom-btn zoom-fit" id="zoom-fit" title="Fit to View">⊡</button>
+        </div>
+        <!-- Discovery Log Panel -->
+        <div class="discovery-log collapsed" id="discovery-log">
+            <div class="discovery-log-header" id="discovery-log-toggle">
+                <span class="discovery-log-title">DISCOVERY LOG</span>
+                <span class="discovery-log-badge" id="discovery-log-badge"></span>
+                <button class="discovery-log-expand" id="discovery-log-expand">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <polyline points="18 15 12 9 6 15"/>
+                    </svg>
+                </button>
+            </div>
+            <div class="discovery-log-content" id="discovery-log-content">
+                <div class="discovery-log-empty">No discovery activity</div>
+            </div>
         </div>
         <div class="loading-container" id="loading">
             <div class="loading-spinner"></div>
@@ -59,6 +127,91 @@
         <span>|</span>
         <span>BY THE OMNISSIAH'S WILL</span>
     </footer>
+
+    <!-- Paste YAML Modal -->
+    <div class="modal-overlay" id="paste-modal">
+        <div class="modal">
+            <div class="modal-header">
+                <h2 class="modal-title">&gt; PASTE ANSIBLE INVENTORY</h2>
+                <button class="modal-close" id="paste-modal-close">&times;</button>
+            </div>
+            <div class="modal-body">
+                <textarea id="paste-textarea" placeholder="---
+all:
+  children:
+    network:
+      hosts:
+        router:
+          ansible_host: 192.168.0.1
+          device_type: router"></textarea>
+            </div>
+            <div class="modal-footer">
+                <button class="header-button" id="paste-cancel">CANCEL</button>
+                <button class="header-button modal-submit" id="paste-submit">IMPORT</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Scan Network Modal -->
+    <div class="modal-overlay" id="scan-modal">
+        <div class="modal modal-small">
+            <div class="modal-header">
+                <h2 class="modal-title">&gt; SCAN NETWORK SUBNET</h2>
+                <button class="modal-close" id="scan-modal-close">&times;</button>
+            </div>
+            <div class="modal-body">
+                <label class="input-label">CIDR Range</label>
+                <input type="text" id="scan-cidr" class="text-input" placeholder="192.168.0.0/24" value="192.168.0.0/24">
+                <p class="input-hint">Enter a CIDR notation subnet to scan for live hosts.<br>Example: 192.168.0.0/24 (254 hosts)</p>
+            </div>
+            <div class="modal-footer">
+                <button class="header-button" id="scan-cancel">CANCEL</button>
+                <button class="header-button modal-submit" id="scan-submit">SCAN</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Node Detail / Truth Modal -->
+    <div class="modal-overlay" id="node-detail-modal">
+        <div class="modal">
+            <div class="modal-header">
+                <h2 class="modal-title" id="node-detail-title">&gt; NODE DETAIL</h2>
+                <button class="modal-close" id="node-detail-close">&times;</button>
+            </div>
+            <div class="modal-body">
+                <div id="node-detail-content">
+                    <!-- Node info populated by JS -->
+                </div>
+                <div class="truth-section">
+                    <h3 class="truth-section-title">OPERATOR TRUTH</h3>
+                    <p class="truth-hint">Lock properties as authoritative source of record. Discrepancies will be flagged when discovered values differ.</p>
+                    <div id="truth-properties">
+                        <!-- Truth property inputs populated by JS -->
+                    </div>
+                    <div class="truth-actions">
+                        <button class="header-button" id="set-truth-btn">LOCK AS TRUTH</button>
+                        <button class="header-button header-button-danger" id="clear-truth-btn">CLEAR TRUTH</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Discrepancy Panel -->
+    <div class="discrepancy-panel collapsed hidden" id="discrepancy-panel">
+        <div class="discrepancy-panel-header" id="discrepancy-panel-toggle">
+            <span class="discrepancy-panel-title">DISCREPANCIES</span>
+            <span class="discrepancy-panel-badge" id="discrepancy-badge"></span>
+            <button class="discrepancy-panel-expand" id="discrepancy-panel-expand">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <polyline points="18 15 12 9 6 15"/>
+                </svg>
+            </button>
+        </div>
+        <div class="discrepancy-panel-content" id="discrepancy-content">
+            <div class="discrepancy-empty">No discrepancies</div>
+        </div>
+    </div>
 
     <script src="/app.js"></script>
 </body>

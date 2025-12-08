@@ -1,0 +1,51 @@
+---
+# Vanderlyn Core Infrastructure
+# This represents the essential network backbone
+all:
+  children:
+    network:
+      hosts:
+        er8411:
+          ansible_host: 192.168.0.1
+          device_type: router
+          description: "TP-Link ER8411 Omada Router (Gateway)"
+        omada:
+          ansible_host: 192.168.0.49
+          device_type: controller
+          description: "TP-Link Omada SDN controller"
+        ap1:
+          ansible_host: 192.168.0.2
+          device_type: access_point
+          description: "TP-Link EAP 773 Access Point 1"
+        ap2:
+          ansible_host: 192.168.0.3
+          device_type: access_point
+          description: "TP-Link EAP 773 Access Point 2"
+
+    dns_servers:
+      hosts:
+        astronomican:
+          ansible_host: 192.168.0.5
+          description: "Primary DNS/DHCP server (Technitium)"
+
+    infrastructure:
+      hosts:
+        brutus:
+          ansible_host: 192.168.0.8
+          role: k3s_target
+          description: "Primary K3s cluster node"
+        truenas:
+          ansible_host: 192.168.0.10
+          role: storage
+          description: "TrueNAS storage server"
+        seed:
+          ansible_host: 192.168.0.100
+          role: application_host
+          description: "Primary Docker host (Komodo)"
+
+    k8s_loadbalancers:
+      hosts:
+        traefik-lb:
+          ansible_host: 192.168.0.101
+          role: ingress_controller
+          description: "Traefik K8s Ingress (MetalLB VIP)"

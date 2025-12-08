@@ -1,0 +1,973 @@
+openapi: 3.0.3
+info:
+  title: netdiagram-go API
+  description: |
+    Network topology visualization and management API.
+
+    This API provides a graph database (SQLite) as a source of truth for network infrastructure.
+    Core functionality includes:
+    - Import: Parse external formats (Ansible inventory, YAML, network scans) and merge into DB
+    - Export: Transform database contents into various output formats
+    - Real-time updates: Server-Sent Events for live topology changes
+    - Position persistence: Save and restore node layout positions
+
+    The data model uses flexible nodes and edges with property bags, allowing representation
+    of diverse network components (servers, switches, routers, VMs, VIPs, containers, etc.)
+  version: 1.0.0
+  contact:
+    name: Vanderlyn Homelab
+servers:
+  - url: https://netdiagram.vanderlyn.house
+    description: Production server
+  - url: http://localhost:3000
+    description: Local development server
+
+tags:
+  - name: Graph
+    description: Full graph operations for visualization
+  - name: Nodes
+    description: Node CRUD operations
+  - name: Edges
+    description: Edge CRUD operations
+  - name: Positions
+    description: Node position management for layout persistence
+  - name: Import
+    description: Import from external formats
+  - name: Export
+    description: Export to external formats
+  - name: Events
+    description: Real-time updates via Server-Sent Events
+
+paths:
+  /api/graph:
+    get:
+      tags:
+        - Graph
+      summary: Get full graph
+      description: |
+        Returns the complete network topology including all nodes, edges, and saved positions.
+        This is the primary endpoint for visualization clients.
+      operationId: getGraph
+      responses:
+        '200':
+          description: Complete graph data
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Graph'
+              example:
+                nodes:
+                  - id: "brutus"
+                    type: "server"
+                    label: "brutus"
+                    properties:
+                      ip: "192.168.0.10"
+                      hostname: "brutus.vanderlyn.local"
+                      os: "Debian 12"
+                      role: "k3s-server"
+                    source: "ansible"
+                    created_at: "2025-12-07T10:00:00Z"
+                    updated_at: "2025-12-07T10:00:00Z"
+                  - id: "core-switch"
+                    type: "switch"
+                    label: "Core Switch"
+                    properties:
+                      ip: "192.168.0.1"
+                      model: "UniFi Switch 24"
+                    source: "manual"
+                    created_at: "2025-12-07T10:00:00Z"
+                    updated_at: "2025-12-07T10:00:00Z"
+                edges:
+                  - id: "edge-1"
+                    from_id: "brutus"
+                    to_id: "core-switch"
+                    type: "ethernet"
+                    properties:
+                      speed: "1GbE"
+                      interface: "eth0"
+                positions:
+                  brutus:
+                    node_id: "brutus"
+                    x: 100.5
+                    y: 200.3
+                    pinned: true
+                  core-switch:
+                    node_id: "core-switch"
+                    x: 300.0
+                    y: 200.0
+                    pinned: false
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /api/nodes:
+    get:
+      tags:
+        - Nodes
+      summary: List all nodes
+      description: |
+        Retrieve all nodes in the graph, optionally filtered by type or source.
+        Supports query parameters for filtering.
+      operationId: listNodes
+      parameters:
+        - name: type
+          in: query
+          description: Filter by node type (e.g., server, switch, router)
+          required: false
+          schema:
+            type: string
+          example: server
+        - name: source
+          in: query
+          description: Filter by data source (e.g., ansible, scan, manual)
+          required: false
+          schema:
+            type: string
+          example: ansible
+      responses:
+        '200':
+          description: List of nodes
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Node'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+    post:
+      tags:
+        - Nodes
+      summary: Create a node
+      description: |
+        Create a new node in the graph. The ID can be provided or will be auto-generated.
+        Properties map is flexible and can contain any key-value pairs relevant to the node type.
+      operationId: createNode
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Node'
+            example:
+              id: "miniser1"
+              type: "server"
+              label: "miniser1"
+              properties:
+                ip: "192.168.0.35"
+                hostname: "miniser1.vanderlyn.local"
+                os: "Debian 12"
+                role: "komodo-periphery"
+              source: "ansible"
+      responses:
+        '201':
+          description: Node created successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Node'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /api/nodes/{id}:
+    get:
+      tags:
+        - Nodes
+      summary: Get a node by ID
+      description: Retrieve a single node by its unique identifier
+      operationId: getNode
+      parameters:
+        - $ref: '#/components/parameters/NodeID'
+      responses:
+        '200':
+          description: Node details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Node'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+    put:
+      tags:
+        - Nodes
+      summary: Update a node
+      description: |
+        Update an existing node. Supports partial updates - only provided fields will be modified.
+        The properties map is merged, not replaced (to replace a property, set it to null).
+      operationId: updateNode
+      parameters:
+        - $ref: '#/components/parameters/NodeID'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Node'
+            example:
+              label: "miniser1 (RF Platform)"
+              properties:
+                description: "Radio frequency monitoring platform"
+      responses:
+        '200':
+          description: Node updated successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Node'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+    delete:
+      tags:
+        - Nodes
+      summary: Delete a node
+      description: |
+        Delete a node and all edges connected to it. This operation is irreversible.
+      operationId: deleteNode
+      parameters:
+        - $ref: '#/components/parameters/NodeID'
+      responses:
+        '204':
+          description: Node deleted successfully
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /api/edges:
+    get:
+      tags:
+        - Edges
+      summary: List all edges
+      description: |
+        Retrieve all edges in the graph, optionally filtered by type or connected node.
+      operationId: listEdges
+      parameters:
+        - name: type
+          in: query
+          description: Filter by edge type (e.g., ethernet, vlan, virtual)
+          required: false
+          schema:
+            type: string
+          example: ethernet
+        - name: from_id
+          in: query
+          description: Filter by source node ID
+          required: false
+          schema:
+            type: string
+          example: brutus
+        - name: to_id
+          in: query
+          description: Filter by destination node ID
+          required: false
+          schema:
+            type: string
+      responses:
+        '200':
+          description: List of edges
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Edge'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+    post:
+      tags:
+        - Edges
+      summary: Create an edge
+      description: |
+        Create a new edge between two nodes. Both from_id and to_id must reference existing nodes.
+      operationId: createEdge
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Edge'
+            example:
+              from_id: "brutus"
+              to_id: "core-switch"
+              type: "ethernet"
+              properties:
+                speed: "1GbE"
+                interface: "eth0"
+      responses:
+        '201':
+          description: Edge created successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Edge'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /api/edges/{id}:
+    get:
+      tags:
+        - Edges
+      summary: Get an edge by ID
+      description: Retrieve a single edge by its unique identifier
+      operationId: getEdge
+      parameters:
+        - $ref: '#/components/parameters/EdgeID'
+      responses:
+        '200':
+          description: Edge details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Edge'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+    put:
+      tags:
+        - Edges
+      summary: Update an edge
+      description: |
+        Update an existing edge. Supports partial updates.
+      operationId: updateEdge
+      parameters:
+        - $ref: '#/components/parameters/EdgeID'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Edge'
+            example:
+              properties:
+                speed: "10GbE"
+      responses:
+        '200':
+          description: Edge updated successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Edge'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+    delete:
+      tags:
+        - Edges
+      summary: Delete an edge
+      description: Delete an edge from the graph. This operation is irreversible.
+      operationId: deleteEdge
+      parameters:
+        - $ref: '#/components/parameters/EdgeID'
+      responses:
+        '204':
+          description: Edge deleted successfully
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /api/positions:
+    get:
+      tags:
+        - Positions
+      summary: Get all node positions
+      description: |
+        Retrieve saved layout positions for all nodes.
+        Returns a map of node_id to position data.
+      operationId: getPositions
+      responses:
+        '200':
+          description: Map of node positions
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties:
+                  $ref: '#/components/schemas/NodePosition'
+              example:
+                brutus:
+                  node_id: "brutus"
+                  x: 100.5
+                  y: 200.3
+                  pinned: true
+                core-switch:
+                  node_id: "core-switch"
+                  x: 300.0
+                  y: 200.0
+                  pinned: false
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+    post:
+      tags:
+        - Positions
+      summary: Bulk save node positions
+      description: |
+        Save multiple node positions at once. This is typically called by the visualization
+        client when the user moves nodes or when auto-layout completes.
+      operationId: savePositions
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: array
+              items:
+                $ref: '#/components/schemas/NodePosition'
+            example:
+              - node_id: "brutus"
+                x: 150.0
+                y: 250.0
+                pinned: true
+              - node_id: "core-switch"
+                x: 350.0
+                y: 250.0
+                pinned: false
+      responses:
+        '200':
+          description: Positions saved successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  saved:
+                    type: integer
+                    description: Number of positions saved
+                example:
+                  saved: 2
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /api/positions/{node_id}:
+    put:
+      tags:
+        - Positions
+      summary: Update a single node position
+      description: Update the saved position for a specific node
+      operationId: updatePosition
+      parameters:
+        - $ref: '#/components/parameters/NodeID'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/NodePosition'
+            example:
+              node_id: "brutus"
+              x: 175.0
+              y: 275.0
+              pinned: true
+      responses:
+        '200':
+          description: Position updated successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NodePosition'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /api/import/yaml:
+    post:
+      tags:
+        - Import
+      summary: Import from generic YAML format
+      description: |
+        Import network topology from a generic YAML format containing nodes and edges.
+
+        Merge strategy (default): Upserts nodes/edges by ID, preserving existing data not in import
+        Replace strategy: Clears all existing data before importing
+      operationId: importYaml
+      parameters:
+        - $ref: '#/components/parameters/ImportStrategy'
+      requestBody:
+        required: true
+        content:
+          application/x-yaml:
+            schema:
+              type: string
+            example: |
+              nodes:
+                - id: server1
+                  type: server
+                  label: Server 1
+                  properties:
+                    ip: 192.168.0.10
+                edges:
+                - from_id: server1
+                  to_id: switch1
+                  type: ethernet
+      responses:
+        '200':
+          description: Import successful
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ImportResult'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /api/import/ansible-inventory:
+    post:
+      tags:
+        - Import
+      summary: Import from Ansible inventory
+      description: |
+        Import network topology from an Ansible inventory YAML file.
+        Parses host groups, variables, and infers network connections based on configuration.
+      operationId: importAnsibleInventory
+      parameters:
+        - $ref: '#/components/parameters/ImportStrategy'
+      requestBody:
+        required: true
+        content:
+          application/x-yaml:
+            schema:
+              type: string
+            example: |
+              all:
+                children:
+                  servers:
+                    hosts:
+                      brutus:
+                        ansible_host: 192.168.0.10
+                        role: k3s-server
+      responses:
+        '200':
+          description: Import successful
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ImportResult'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /api/import/scan:
+    post:
+      tags:
+        - Import
+      summary: Trigger network scan
+      description: |
+        Initiate a network scan to discover devices and topology.
+        Scan results are automatically imported into the graph database.
+      operationId: importScan
+      parameters:
+        - $ref: '#/components/parameters/ImportStrategy'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ScanConfig'
+            example:
+              cidr: "192.168.0.0/24"
+              timeout: 30
+              discover_edges: true
+      responses:
+        '200':
+          description: Scan completed and imported successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ImportResult'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /api/export/json:
+    get:
+      tags:
+        - Export
+      summary: Export full graph as JSON
+      description: |
+        Export the complete network topology as JSON.
+        Returns nodes and edges without position data.
+      operationId: exportJson
+      responses:
+        '200':
+          description: Graph exported successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GraphFragment'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /api/export/yaml:
+    get:
+      tags:
+        - Export
+      summary: Export as generic YAML format
+      description: |
+        Export the network topology as generic YAML containing nodes and edges.
+      operationId: exportYaml
+      responses:
+        '200':
+          description: Graph exported successfully
+          content:
+            application/x-yaml:
+              schema:
+                type: string
+              example: |
+                nodes:
+                  - id: brutus
+                    type: server
+                    label: brutus
+                    properties:
+                      ip: 192.168.0.10
+                edges:
+                  - from_id: brutus
+                    to_id: core-switch
+                    type: ethernet
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /api/export/ansible-inventory:
+    get:
+      tags:
+        - Export
+      summary: Export as Ansible inventory
+      description: |
+        Export the network topology as an Ansible inventory YAML file.
+        Organizes nodes into groups based on their type and properties.
+      operationId: exportAnsibleInventory
+      responses:
+        '200':
+          description: Inventory exported successfully
+          content:
+            application/x-yaml:
+              schema:
+                type: string
+              example: |
+                all:
+                  children:
+                    servers:
+                      hosts:
+                        brutus:
+                          ansible_host: 192.168.0.10
+                          role: k3s-server
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /events:
+    get:
+      tags:
+        - Events
+      summary: Server-Sent Events stream
+      description: |
+        Subscribe to real-time topology updates via Server-Sent Events (SSE).
+
+        Event types:
+        - graph-updated: Full graph has been reloaded
+        - node-created: New node added
+        - node-updated: Node modified
+        - node-deleted: Node removed
+        - edge-created: New edge added
+        - edge-deleted: Edge removed
+
+        The client should maintain a persistent connection and handle reconnection.
+      operationId: subscribeEvents
+      responses:
+        '200':
+          description: SSE stream established
+          content:
+            text/event-stream:
+              schema:
+                type: string
+              example: |
+                event: graph-updated
+                data: {"timestamp":"2025-12-07T10:30:00Z"}
+
+                event: node-created
+                data: {"node_id":"new-server","type":"server"}
+
+components:
+  schemas:
+    Node:
+      type: object
+      required:
+        - id
+        - type
+        - label
+      properties:
+        id:
+          type: string
+          description: Unique identifier for the node
+          example: "brutus"
+        type:
+          type: string
+          description: Node type (server, switch, router, vm, vip, container, etc.)
+          example: "server"
+        label:
+          type: string
+          description: Display label for visualization
+          example: "brutus"
+        properties:
+          type: object
+          additionalProperties: true
+          description: |
+            Flexible property bag for node-specific attributes.
+            Common properties: ip, mac, hostname, os, role, model, vendor, etc.
+          example:
+            ip: "192.168.0.10"
+            hostname: "brutus.vanderlyn.local"
+            os: "Debian 12"
+            role: "k3s-server"
+        source:
+          type: string
+          description: Data source that created this node (ansible, scan, manual, etc.)
+          example: "ansible"
+        created_at:
+          type: string
+          format: date-time
+          description: ISO 8601 timestamp of node creation
+          example: "2025-12-07T10:00:00Z"
+        updated_at:
+          type: string
+          format: date-time
+          description: ISO 8601 timestamp of last update
+          example: "2025-12-07T10:00:00Z"
+
+    Edge:
+      type: object
+      required:
+        - from_id
+        - to_id
+        - type
+      properties:
+        id:
+          type: string
+          description: Unique identifier for the edge (auto-generated if not provided)
+          example: "edge-1"
+        from_id:
+          type: string
+          description: Source node ID
+          example: "brutus"
+        to_id:
+          type: string
+          description: Destination node ID
+          example: "core-switch"
+        type:
+          type: string
+          description: Edge type (ethernet, vlan, virtual, aggregation, etc.)
+          example: "ethernet"
+        properties:
+          type: object
+          additionalProperties: true
+          description: |
+            Flexible property bag for edge-specific attributes.
+            Common properties: speed, vlan_id, interface, port, duplex, etc.
+          example:
+            speed: "1GbE"
+            interface: "eth0"
+
+    NodePosition:
+      type: object
+      required:
+        - node_id
+        - x
+        - y
+      properties:
+        node_id:
+          type: string
+          description: Reference to the node being positioned
+          example: "brutus"
+        x:
+          type: number
+          format: float
+          description: X coordinate in visualization canvas
+          example: 100.5
+        y:
+          type: number
+          format: float
+          description: Y coordinate in visualization canvas
+          example: 200.3
+        pinned:
+          type: boolean
+          description: Whether the node position is locked (prevents auto-layout from moving it)
+          default: false
+          example: true
+
+    GraphFragment:
+      type: object
+      description: Partial graph data used for import/export operations
+      properties:
+        nodes:
+          type: array
+          items:
+            $ref: '#/components/schemas/Node'
+        edges:
+          type: array
+          items:
+            $ref: '#/components/schemas/Edge'
+
+    Graph:
+      type: object
+      description: Complete graph data including positions for visualization
+      properties:
+        nodes:
+          type: array
+          items:
+            $ref: '#/components/schemas/Node'
+        edges:
+          type: array
+          items:
+            $ref: '#/components/schemas/Edge'
+        positions:
+          type: object
+          additionalProperties:
+            $ref: '#/components/schemas/NodePosition'
+          description: Map of node_id to position data
+
+    ScanConfig:
+      type: object
+      required:
+        - cidr
+      properties:
+        cidr:
+          type: string
+          description: CIDR range to scan (e.g., 192.168.0.0/24)
+          example: "192.168.0.0/24"
+        timeout:
+          type: integer
+          description: Scan timeout in seconds
+          default: 30
+          example: 30
+        discover_edges:
+          type: boolean
+          description: Whether to attempt edge discovery (requires additional probing)
+          default: true
+          example: true
+
+    ImportResult:
+      type: object
+      properties:
+        nodes_created:
+          type: integer
+          description: Number of nodes created
+          example: 5
+        nodes_updated:
+          type: integer
+          description: Number of nodes updated (merge strategy only)
+          example: 2
+        edges_created:
+          type: integer
+          description: Number of edges created
+          example: 8
+        edges_updated:
+          type: integer
+          description: Number of edges updated (merge strategy only)
+          example: 1
+        strategy:
+          type: string
+          enum: [merge, replace]
+          description: Import strategy used
+          example: "merge"
+
+    Error:
+      type: object
+      properties:
+        error:
+          type: string
+          description: Human-readable error message
+          example: "Invalid node ID"
+        details:
+          type: string
+          description: Additional error details (optional)
+          example: "Node ID must be non-empty string"
+
+  parameters:
+    NodeID:
+      name: id
+      in: path
+      required: true
+      description: Node unique identifier
+      schema:
+        type: string
+      example: brutus
+
+    EdgeID:
+      name: id
+      in: path
+      required: true
+      description: Edge unique identifier
+      schema:
+        type: string
+      example: edge-1
+
+    ImportStrategy:
+      name: strategy
+      in: query
+      required: false
+      description: |
+        Import strategy:
+        - merge (default): Upsert nodes/edges by ID, preserve existing data
+        - replace: Clear all data before importing
+      schema:
+        type: string
+        enum: [merge, replace]
+        default: merge
+      example: merge
+
+  responses:
+    BadRequest:
+      description: Bad request - invalid input
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            error: "Invalid request body"
+            details: "Missing required field 'type'"
+
+    NotFound:
+      description: Resource not found
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            error: "Not found"
+            details: "Node with ID 'xyz' does not exist"
+
+    InternalServerError:
+      description: Internal server error
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            error: "Internal server error"
+            details: "Database connection failed"

@@ -14,7 +14,7 @@ RUN go mod download
 COPY . .
 
 # Tidy modules and build the application with CGO enabled for SQLite
-RUN go mod tidy && CGO_ENABLED=1 GOOS=linux go build -o netdiagram -ldflags="-s -w" ./cmd/server
+RUN go mod tidy && CGO_ENABLED=1 GOOS=linux go build -o specularium -ldflags="-s -w" ./cmd/server
 
 # Production stage
 FROM alpine:3.19
@@ -25,7 +25,7 @@ RUN apk add --no-cache ca-certificates sqlite-libs tzdata
 WORKDIR /app
 
 # Copy binary from builder
-COPY --from=builder /app/netdiagram /usr/local/bin/
+COPY --from=builder /app/specularium /usr/local/bin/
 
 # Create data directory
 RUN mkdir -p /data
@@ -41,10 +41,10 @@ HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
     CMD wget --no-verbose --tries=1 --spider http://localhost:3000/ || exit 1
 
 # Run as non-root user
-RUN adduser -D -u 1000 netdiagram
-RUN chown -R netdiagram:netdiagram /data
-USER netdiagram
+RUN adduser -D -u 1000 specularium
+RUN chown -R specularium:specularium /data
+USER specularium
 
 # Start the application
-ENTRYPOINT ["netdiagram"]
-CMD ["-addr", ":3000", "-db", "/data/netdiagram.db"]
+ENTRYPOINT ["specularium"]
+CMD ["-addr", ":3000", "-db", "/data/specularium.db"]

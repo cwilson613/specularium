@@ -3,7 +3,7 @@ package repository
 import (
 	"context"
 
-	"netdiagram/internal/domain"
+	"specularium/internal/domain"
 )
 
 // Repository defines the interface for infrastructure data access
