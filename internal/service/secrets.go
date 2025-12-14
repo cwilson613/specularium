@@ -3,7 +3,6 @@ package service
 import (
 	"context"
 	"fmt"
-	"io/ioutil"
 	"log"
 	"os"
 	"path/filepath"
@@ -60,29 +59,59 @@ func (s *SecretsService) LoadMountedSecrets() error {
 	s.mountedSecrets = make(map[string]*domain.Secret)
 	now := time.Now()
 
+	var loadErrors []string
+
 	for _, basePath := range s.mountedPaths {
 		if _, err := os.Stat(basePath); os.IsNotExist(err) {
 			continue
 		}
 
 		// Walk the secrets directory
-		err := filepath.Walk(basePath, func(path string, info os.FileInfo, err error) error {
-			if err != nil {
-				return nil // Skip errors
+		err := filepath.Walk(basePath, func(path string, info os.FileInfo, walkErr error) error {
+			if walkErr != nil {
+				// Log and track walk errors but continue processing
+				errMsg := fmt.Sprintf("walk error at %s: %v", path, walkErr)
+				log.Printf("Warning: %s", errMsg)
+				loadErrors = append(loadErrors, errMsg)
+				return nil // Continue walking
 			}
 			if info.IsDir() {
 				return nil
 			}
 
-			// Read secret file
-			data, err := ioutil.ReadFile(path)
-			if err != nil {
-				log.Printf("Failed to read mounted secret %s: %v", path, err)
+			// Limit secret file size to prevent OOM (1MB max)
+			const maxSecretSize = 1024 * 1024
+			if info.Size() > maxSecretSize {
+				errMsg := fmt.Sprintf("secret file %s exceeds max size (%d > %d bytes)", path, info.Size(), maxSecretSize)
+				log.Printf("Warning: %s", errMsg)
+				loadErrors = append(loadErrors, errMsg)
 				return nil
 			}
 
-			// Generate secret ID from path
-			relPath, _ := filepath.Rel(basePath, path)
+			// Read secret file
+			data, err := os.ReadFile(path)
+			if err != nil {
+				errMsg := fmt.Sprintf("failed to read %s: %v", path, err)
+				log.Printf("Warning: %s", errMsg)
+				loadErrors = append(loadErrors, errMsg)
+				return nil // Continue processing other secrets
+			}
+
+			// Generate secret ID from path (sanitize to prevent path traversal)
+			relPath, err := filepath.Rel(basePath, path)
+			if err != nil {
+				errMsg := fmt.Sprintf("failed to get relative path for %s: %v", path, err)
+				log.Printf("Warning: %s", errMsg)
+				loadErrors = append(loadErrors, errMsg)
+				return nil
+			}
+			// Sanitize: reject paths that escape the base
+			if strings.HasPrefix(relPath, "..") {
+				errMsg := fmt.Sprintf("path traversal detected: %s", path)
+				log.Printf("Warning: %s", errMsg)
+				loadErrors = append(loadErrors, errMsg)
+				return nil
+			}
 			secretID := "mounted." + strings.ReplaceAll(relPath, "/", ".")
 			secretID = strings.TrimSuffix(secretID, filepath.Ext(secretID))
 
@@ -115,7 +144,9 @@ func (s *SecretsService) LoadMountedSecrets() error {
 		})
 
 		if err != nil {
-			log.Printf("Error walking secrets path %s: %v", basePath, err)
+			errMsg := fmt.Sprintf("error walking %s: %v", basePath, err)
+			log.Printf("Error: %s", errMsg)
+			loadErrors = append(loadErrors, errMsg)
 		}
 	}
 
@@ -123,6 +154,11 @@ func (s *SecretsService) LoadMountedSecrets() error {
 	s.loadEnvSecrets(now)
 
 	log.Printf("Loaded %d mounted secrets", len(s.mountedSecrets))
+
+	// Return aggregated errors if any occurred
+	if len(loadErrors) > 0 {
+		return fmt.Errorf("encountered %d errors loading secrets: %s", len(loadErrors), strings.Join(loadErrors, "; "))
+	}
 	return nil
 }
 

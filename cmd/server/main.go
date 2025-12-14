@@ -4,7 +4,6 @@ import (
 	"context"
 	"embed"
 	"flag"
-	"fmt"
 	"io/fs"
 	"log"
 	"net/http"
@@ -125,87 +124,11 @@ func main() {
 	// Initialize capability manager for adapter access to secrets
 	capabilityMgr := adapter.NewCapabilityManager(secretsSvc)
 
+	// Initialize reconcile service for adapter discoveries
+	reconcileSvc := service.NewReconcileService(repo, truthSvc, eventBus)
+
 	// Initialize adapter registry with reconcile function
-	adapterRegistry := adapter.NewRegistry(func(ctx context.Context, source string, fragment *domain.GraphFragment) error {
-		// Reconcile verification results - update node status/discovered fields
-		// Only emit events for nodes that actually changed to avoid physics reset
-		changedCount := 0
-		for _, node := range fragment.Nodes {
-			// Get existing node to compare
-			existing, _ := repo.GetNode(ctx, node.ID)
-			if existing == nil {
-				// Node doesn't exist (shouldn't happen for verifier, but handle it)
-				log.Printf("Node %s not found during verification reconcile", node.ID)
-				continue
-			}
-
-			// Check if verification data actually changed
-			statusChanged := existing.Status != node.Status
-			discoveredChanged := !discoveredEqual(existing.Discovered, node.Discovered)
-
-			if !statusChanged && !discoveredChanged {
-				// No changes, skip update and event
-				continue
-			}
-
-			// Update verification status
-			if err := repo.UpdateNodeVerification(ctx, node.ID, node.Status, node.LastVerified, node.LastSeen, node.Discovered); err != nil {
-				log.Printf("Failed to update verification for %s: %v", node.ID, err)
-				continue
-			}
-
-			// Check for discrepancies against operator truth
-			// This compares discovered values with truth assertions
-			discrepancies, err := truthSvc.CheckDiscrepancies(ctx, node.ID, node.Discovered, source)
-			if err != nil {
-				log.Printf("Failed to check discrepancies for %s: %v", node.ID, err)
-			} else if len(discrepancies) > 0 {
-				log.Printf("Node %s has %d new discrepancies with operator truth", node.ID, len(discrepancies))
-			}
-
-			// Auto-update label from hostname inference if no operator truth
-			labelUpdated := false
-			if inference := extractHostnameInference(node.Discovered); inference != nil && inference.Best != nil {
-				// Check if operator has set hostname/label truth
-				hasOperatorHostname, _ := repo.HasOperatorTruthHostname(ctx, node.ID)
-				if !hasOperatorHostname {
-					// Use best inferred hostname as label (short name)
-					newLabel := domain.ExtractShortName(inference.Best.Hostname)
-					if newLabel != "" && newLabel != existing.Label {
-						if err := repo.UpdateNodeLabel(ctx, node.ID, newLabel); err != nil {
-							log.Printf("Failed to update label for %s: %v", node.ID, err)
-						} else {
-							log.Printf("Auto-updated label for %s: %s -> %s (confidence: %.0f%%, source: %s)",
-								node.ID, existing.Label, newLabel,
-								inference.Best.Confidence*100, inference.Best.Source)
-							labelUpdated = true
-						}
-					}
-				}
-			}
-
-			// Fetch the updated node with all fields for the event payload
-			updatedNode, err := repo.GetNode(ctx, node.ID)
-			if err != nil {
-				log.Printf("Failed to fetch updated node %s: %v", node.ID, err)
-				continue
-			}
-
-			// Emit node-updated event with full node data for incremental UI update
-			eventBus.Publish(service.Event{
-				Type:    service.EventNodeUpdated,
-				Payload: updatedNode,
-			})
-			changedCount++
-			_ = labelUpdated // Used for logging above
-		}
-
-		if changedCount > 0 {
-			log.Printf("Reconciled %d changed nodes from %s", changedCount, source)
-		}
-		// Don't emit graph-updated - individual node-updated events handle UI updates
-		return nil
-	})
+	adapterRegistry := adapter.NewRegistry(reconcileSvc.ReconcileFragment)
 
 	// Set up discovery event handler to broadcast to SSE
 	adapterRegistry.SetDiscoveryEventHandler(func(eventType string, payload interface{}) {
@@ -316,6 +239,36 @@ func main() {
 	log.Printf("Running bootstrap to discover infrastructure...")
 	if err := bootstrapSvc.Bootstrap(context.Background()); err != nil {
 		log.Printf("Warning: Bootstrap discovery failed: %v", err)
+	}
+
+	// Persist bootstrap results to config if needed
+	if cfg.NeedsBootstrap() || *forceBootstrap {
+		env := bootstrapAdapter.GetEnvironment()
+		bootstrapResult := config.BuildBootstrapResult(
+			env.Hostname,
+			env.InKubernetes,
+			env.InDocker,
+			env.DefaultGateway,
+			env.DNSServers,
+			env.LocalSubnet,
+		)
+		cfg.SetBootstrapResult(bootstrapResult)
+
+		// Save updated config
+		if configPath != "" {
+			if err := cfg.Save(configPath); err != nil {
+				log.Printf("Warning: Failed to save bootstrap results to config: %v", err)
+			} else {
+				log.Printf("Bootstrap results saved to: %s", configPath)
+				log.Printf("Recommended mode: %s (confidence: %.0f%%)",
+					bootstrapResult.Recommendation.Mode,
+					bootstrapResult.Recommendation.Confidence*100)
+			}
+		}
+
+		// Update effective mode now that we have bootstrap recommendation
+		effectiveMode = cfg.EffectiveMode()
+		log.Printf("Effective mode after bootstrap: %s", effectiveMode)
 	}
 
 	// Start adapter registry
@@ -584,21 +537,8 @@ func (b *bootstrapService) Bootstrap(ctx context.Context) error {
 }
 
 // GetEnvironment returns the detected environment info
-func (b *bootstrapService) GetEnvironment() handler.BootstrapEnvironment {
-	env := b.bootstrap.GetEnvironment()
-	return handler.BootstrapEnvironment{
-		InKubernetes:   env.InKubernetes,
-		InDocker:       env.InDocker,
-		Hostname:       env.Hostname,
-		PodName:        env.PodName,
-		PodNamespace:   env.PodNamespace,
-		PodIP:          env.PodIP,
-		NodeName:       env.NodeName,
-		DefaultGateway: env.DefaultGateway,
-		DNSServers:     env.DNSServers,
-		LocalSubnet:    env.LocalSubnet,
-		ClusterDNS:     env.ClusterDNS,
-	}
+func (b *bootstrapService) GetEnvironment() domain.EnvironmentInfo {
+	return b.bootstrap.GetEnvironment()
 }
 
 // GetSuggestedScanTargets returns networks to scan
@@ -607,111 +547,6 @@ func (b *bootstrapService) GetSuggestedScanTargets() []string {
 }
 
 // GetScanTargets returns categorized scan targets (primary and discovery)
-func (b *bootstrapService) GetScanTargets() handler.ScanTargets {
-	targets := b.bootstrap.GetScanTargets()
-	return handler.ScanTargets{
-		Primary:   targets.Primary,
-		Discovery: targets.Discovery,
-	}
-}
-
-// discoveredEqual compares two discovered maps for equality
-// Returns true if both maps have the same keys and values
-func discoveredEqual(a, b map[string]any) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for k, va := range a {
-		vb, ok := b[k]
-		if !ok {
-			return false
-		}
-		// Compare values - handle common types
-		switch va := va.(type) {
-		case int64:
-			if vb, ok := vb.(int64); !ok || va != vb {
-				return false
-			}
-		case float64:
-			if vb, ok := vb.(float64); !ok || va != vb {
-				return false
-			}
-		case string:
-			if vb, ok := vb.(string); !ok || va != vb {
-				return false
-			}
-		case bool:
-			if vb, ok := vb.(bool); !ok || va != vb {
-				return false
-			}
-		default:
-			// For complex types (slices, maps), use fmt.Sprintf comparison
-			if fmt.Sprintf("%v", va) != fmt.Sprintf("%v", vb) {
-				return false
-			}
-		}
-	}
-	return true
-}
-
-// extractHostnameInference extracts HostnameInference from discovered map
-func extractHostnameInference(discovered map[string]any) *domain.HostnameInference {
-	if discovered == nil {
-		return nil
-	}
-	raw, ok := discovered["hostname_inference"]
-	if !ok {
-		return nil
-	}
-
-	// Handle both direct struct and map[string]interface{} (from JSON)
-	switch v := raw.(type) {
-	case domain.HostnameInference:
-		return &v
-	case *domain.HostnameInference:
-		return v
-	case map[string]interface{}:
-		// Reconstruct from map (when loaded from JSON/DB)
-		inference := &domain.HostnameInference{}
-
-		if candidates, ok := v["candidates"].([]interface{}); ok {
-			for _, c := range candidates {
-				if cm, ok := c.(map[string]interface{}); ok {
-					candidate := domain.HostnameCandidate{
-						Hostname:   getStringField(cm, "hostname"),
-						Confidence: getFloatField(cm, "confidence"),
-						Source:     domain.ConfidenceSource(getStringField(cm, "source")),
-					}
-					inference.Candidates = append(inference.Candidates, candidate)
-				}
-			}
-		}
-
-		if best, ok := v["best"].(map[string]interface{}); ok {
-			inference.Best = &domain.HostnameCandidate{
-				Hostname:   getStringField(best, "hostname"),
-				Confidence: getFloatField(best, "confidence"),
-				Source:     domain.ConfidenceSource(getStringField(best, "source")),
-			}
-		}
-
-		return inference
-	}
-	return nil
-}
-
-// getStringField safely extracts a string field from a map
-func getStringField(m map[string]interface{}, key string) string {
-	if v, ok := m[key].(string); ok {
-		return v
-	}
-	return ""
-}
-
-// getFloatField safely extracts a float64 field from a map
-func getFloatField(m map[string]interface{}, key string) float64 {
-	if v, ok := m[key].(float64); ok {
-		return v
-	}
-	return 0
+func (b *bootstrapService) GetScanTargets() domain.ScanTargets {
+	return b.bootstrap.GetScanTargets()
 }

@@ -3,7 +3,6 @@ package adapter
 import (
 	"context"
 	"fmt"
-	"io/ioutil"
 	"log"
 	"net"
 	"os"
@@ -17,33 +16,7 @@ import (
 // It detects the deployment environment and expands knowledge outward
 type BootstrapAdapter struct {
 	publisher EventPublisher
-	env       EnvironmentInfo
-}
-
-// EnvironmentInfo holds detected runtime environment details
-type EnvironmentInfo struct {
-	// Deployment context
-	InKubernetes  bool
-	InDocker      bool
-	Hostname      string
-	PodName       string
-	PodNamespace  string
-	PodIP         string
-	NodeName      string
-	ServiceAccount string
-
-	// Network context
-	DefaultGateway string
-	DNSServers     []string
-	SearchDomains  []string
-	LocalSubnet    string
-
-	// K8s cluster info (if applicable)
-	ClusterDNS       string
-	KubernetesAPIIP  string
-
-	// Operator-configured scan targets (from SCAN_SUBNETS env var)
-	ConfiguredSubnets []string
+	env       domain.EnvironmentInfo
 }
 
 // NewBootstrapAdapter creates a new bootstrap adapter
@@ -155,16 +128,8 @@ func (b *BootstrapAdapter) Bootstrap(ctx context.Context) (*domain.GraphFragment
 }
 
 // GetEnvironment returns the detected environment info
-func (b *BootstrapAdapter) GetEnvironment() EnvironmentInfo {
+func (b *BootstrapAdapter) GetEnvironment() domain.EnvironmentInfo {
 	return b.env
-}
-
-// ScanTargets contains categorized scan targets
-type ScanTargets struct {
-	// Primary targets - operator-configured or detected from environment
-	Primary []string `json:"primary"`
-	// Discovery targets - RFC1918 ranges for network discovery mode
-	Discovery []string `json:"discovery"`
 }
 
 // GetSuggestedScanTargets returns network ranges to scan based on environment
@@ -176,7 +141,7 @@ func (b *BootstrapAdapter) GetSuggestedScanTargets() []string {
 // GetScanTargets returns categorized scan targets:
 // - Primary: Operator-configured or auto-detected subnets (safe to scan)
 // - Discovery: RFC1918 ranges for network discovery mode (broader scan)
-func (b *BootstrapAdapter) GetScanTargets() ScanTargets {
+func (b *BootstrapAdapter) GetScanTargets() domain.ScanTargets {
 	seen := make(map[string]bool)
 	primary := []string{}
 
@@ -214,7 +179,7 @@ func (b *BootstrapAdapter) GetScanTargets() ScanTargets {
 	// These are shown when "Discovery Mode" is enabled in the UI
 	discovery := b.getDiscoveryTargets(seen)
 
-	return ScanTargets{
+	return domain.ScanTargets{
 		Primary:   primary,
 		Discovery: discovery,
 	}
@@ -345,8 +310,8 @@ func getAdjacentSubnets(subnet string) []string {
 }
 
 // detectEnvironment probes the runtime environment
-func (b *BootstrapAdapter) detectEnvironment() EnvironmentInfo {
-	env := EnvironmentInfo{}
+func (b *BootstrapAdapter) detectEnvironment() domain.EnvironmentInfo {
+	env := domain.EnvironmentInfo{}
 
 	// Basic hostname
 	env.Hostname, _ = os.Hostname()
@@ -376,7 +341,7 @@ func (b *BootstrapAdapter) detectEnvironment() EnvironmentInfo {
 		env.ServiceAccount = "default"
 
 		// Read namespace
-		if ns, err := ioutil.ReadFile("/var/run/secrets/kubernetes.io/serviceaccount/namespace"); err == nil {
+		if ns, err := os.ReadFile("/var/run/secrets/kubernetes.io/serviceaccount/namespace"); err == nil {
 			env.PodNamespace = strings.TrimSpace(string(ns))
 		}
 
@@ -450,7 +415,7 @@ func (b *BootstrapAdapter) resolveHost(hostname string) string {
 func (b *BootstrapAdapter) parseResolvConf() ([]string, []string) {
 	var dnsServers, searchDomains []string
 
-	data, err := ioutil.ReadFile("/etc/resolv.conf")
+	data, err := os.ReadFile("/etc/resolv.conf")
 	if err != nil {
 		return dnsServers, searchDomains
 	}
@@ -472,7 +437,7 @@ func (b *BootstrapAdapter) parseResolvConf() ([]string, []string) {
 // detectDefaultGateway attempts to find the default gateway
 func (b *BootstrapAdapter) detectDefaultGateway() string {
 	// Read /proc/net/route on Linux
-	data, err := ioutil.ReadFile("/proc/net/route")
+	data, err := os.ReadFile("/proc/net/route")
 	if err != nil {
 		return ""
 	}

@@ -25,33 +25,12 @@ type SubnetScanner interface {
 	ScanSubnet(ctx context.Context, cidr string) error
 }
 
-// ScanTargets contains categorized scan targets
-type ScanTargets struct {
-	Primary   []string `json:"primary"`
-	Discovery []string `json:"discovery"`
-}
-
 // Bootstrapper performs initial self-discovery
 type Bootstrapper interface {
 	Bootstrap(ctx context.Context) error
-	GetEnvironment() BootstrapEnvironment
+	GetEnvironment() domain.EnvironmentInfo
 	GetSuggestedScanTargets() []string
-	GetScanTargets() ScanTargets
-}
-
-// BootstrapEnvironment holds detected runtime environment details
-type BootstrapEnvironment struct {
-	InKubernetes   bool     `json:"in_kubernetes"`
-	InDocker       bool     `json:"in_docker"`
-	Hostname       string   `json:"hostname"`
-	PodName        string   `json:"pod_name,omitempty"`
-	PodNamespace   string   `json:"pod_namespace,omitempty"`
-	PodIP          string   `json:"pod_ip,omitempty"`
-	NodeName       string   `json:"node_name,omitempty"`
-	DefaultGateway string   `json:"default_gateway,omitempty"`
-	DNSServers     []string `json:"dns_servers,omitempty"`
-	LocalSubnet    string   `json:"local_subnet,omitempty"`
-	ClusterDNS     string   `json:"cluster_dns,omitempty"`
+	GetScanTargets() domain.ScanTargets
 }
 
 // GraphHandler handles graph API requests

@@ -1,7 +1,8 @@
 package domain
 
 import (
-	"fmt"
+	"reflect"
+	"strconv"
 	"time"
 )
 
@@ -102,7 +103,7 @@ func IsTruthable(key string) bool {
 }
 
 // CompareValues compares truth and actual values for equality
-// Handles type coercion for common cases
+// Handles type coercion for common cases including string-to-primitive conversion
 func CompareValues(truth, actual any) bool {
 	if truth == nil && actual == nil {
 		return true
@@ -111,13 +112,64 @@ func CompareValues(truth, actual any) bool {
 		return false
 	}
 
-	// Try direct comparison
+	// Try direct comparison for simple types
 	if truth == actual {
 		return true
 	}
 
-	// Handle string comparisons
-	truthStr := fmt.Sprintf("%v", truth)
-	actualStr := fmt.Sprintf("%v", actual)
-	return truthStr == actualStr
+	// Handle type-specific comparisons
+	switch t := truth.(type) {
+	case string:
+		// Try direct string comparison
+		if a, ok := actual.(string); ok {
+			return t == a
+		}
+		// Compare string representation for cross-type comparison
+		return t == formatValue(actual)
+	case int:
+		if a, ok := actual.(int); ok {
+			return t == a
+		}
+		return formatValue(t) == formatValue(actual)
+	case int64:
+		if a, ok := actual.(int64); ok {
+			return t == a
+		}
+		return formatValue(t) == formatValue(actual)
+	case float64:
+		if a, ok := actual.(float64); ok {
+			return t == a
+		}
+		return formatValue(t) == formatValue(actual)
+	case bool:
+		if a, ok := actual.(bool); ok {
+			return t == a
+		}
+		return formatValue(t) == formatValue(actual)
+	case []any, []string, map[string]any:
+		// For complex types, use deep equality
+		return reflect.DeepEqual(truth, actual)
+	}
+
+	// Fallback to deep equality for unknown types
+	return reflect.DeepEqual(truth, actual)
+}
+
+// formatValue converts a value to its string representation for comparison
+func formatValue(v any) string {
+	switch val := v.(type) {
+	case string:
+		return val
+	case int:
+		return strconv.Itoa(val)
+	case int64:
+		return strconv.FormatInt(val, 10)
+	case float64:
+		// Use precise formatting without trailing zeros
+		return strconv.FormatFloat(val, 'f', -1, 64)
+	case bool:
+		return strconv.FormatBool(val)
+	default:
+		return ""
+	}
 }

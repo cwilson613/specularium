@@ -190,3 +190,59 @@ func NewBootstrapResult() *BootstrapResult {
 		Timestamp: time.Now(),
 	}
 }
+
+// BuildBootstrapResult constructs a BootstrapResult from detected environment
+func BuildBootstrapResult(hostname string, inK8s, inDocker bool, gateway string, dnsServers []string, localSubnet string) *BootstrapResult {
+	result := NewBootstrapResult()
+
+	// Determine environment type
+	envType := "bare_metal"
+	runtime := "none"
+	confidence := 0.7
+
+	if inK8s {
+		envType = "container"
+		runtime = "kubernetes"
+		confidence = 0.95
+	} else if inDocker {
+		envType = "container"
+		runtime = "docker"
+		confidence = 0.9
+	}
+
+	result.Environment = EnvironmentInfo{
+		Type:       envType,
+		Runtime:    runtime,
+		Confidence: confidence,
+	}
+
+	// Network info
+	result.Network = NetworkInfo{
+		Hostname:   hostname,
+		Gateway:    gateway,
+		DNSServers: dnsServers,
+	}
+
+	// Recommend mode based on environment
+	mode := ModeMonitor
+	reasons := []string{}
+
+	if inK8s {
+		mode = ModeMonitor
+		reasons = append(reasons, "Running in Kubernetes - limited network visibility")
+	} else if inDocker {
+		mode = ModeMonitor
+		reasons = append(reasons, "Running in Docker - network access may be limited")
+	} else {
+		mode = ModeDiscovery
+		reasons = append(reasons, "Running on bare metal - full network access available")
+	}
+
+	result.Recommendation = ModeRecommendation{
+		Mode:       mode,
+		Confidence: confidence,
+		Reasons:    reasons,
+	}
+
+	return result
+}

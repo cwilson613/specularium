@@ -14,6 +14,7 @@ type Client struct {
 	id     string
 	events chan []byte
 	done   chan struct{}
+	closed bool // Protected by Hub mutex when checking
 }
 
 // Hub manages SSE client connections
@@ -48,8 +49,10 @@ func (h *Hub) Run() {
 		case client := <-h.unregister:
 			h.mu.Lock()
 			if _, ok := h.clients[client]; ok {
+				client.closed = true // Mark as closed before deleting
 				delete(h.clients, client)
 				close(client.events)
+				close(client.done)
 			}
 			h.mu.Unlock()
 			log.Printf("SSE client disconnected: %s (total: %d)", client.id, len(h.clients))
@@ -65,8 +68,14 @@ func (h *Hub) Run() {
 
 			h.mu.RLock()
 			for client := range h.clients {
+				// Skip clients marked as closed (defensive check)
+				if client.closed {
+					continue
+				}
 				select {
 				case client.events <- []byte(msg):
+				case <-client.done:
+					// Client is being unregistered, skip
 				default:
 					// Client is slow, skip this message
 					log.Printf("SSE client %s is slow, skipping message", client.id)
