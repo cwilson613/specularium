@@ -16,6 +16,8 @@ const (
 	NodeTypeVM          NodeType = "vm"
 	NodeTypeVIP         NodeType = "vip"
 	NodeTypeContainer   NodeType = "container"
+	NodeTypeInterface   NodeType = "interface" // Network interface, USB port, radio, etc. (child of parent node)
+	NodeTypeSelf        NodeType = "self"      // This Specularium instance
 	NodeTypeUnknown     NodeType = "unknown"
 )
 
@@ -35,6 +37,7 @@ type Node struct {
 	ID         string         `json:"id"`
 	Type       NodeType       `json:"type"`
 	Label      string         `json:"label"`
+	ParentID   string         `json:"parent_id,omitempty"` // Parent node ID for interface/satellite nodes
 	Properties map[string]any `json:"properties,omitempty"`
 	Source     string         `json:"source,omitempty"`
 	CreatedAt  time.Time      `json:"created_at"`
@@ -52,6 +55,14 @@ type Node struct {
 	Truth          *NodeTruth  `json:"truth,omitempty"`
 	TruthStatus    TruthStatus `json:"truth_status,omitempty"`
 	HasDiscrepancy bool        `json:"has_discrepancy,omitempty"`
+
+	// Capabilities detected for this node (K8s, Docker, SSH, etc.)
+	Capabilities map[CapabilityType]*Capability `json:"capabilities,omitempty"`
+}
+
+// IsInterface returns true if this node is a child interface node
+func (n *Node) IsInterface() bool {
+	return n.ParentID != ""
 }
 
 // NewNode creates a new node with initialized properties
@@ -251,4 +262,44 @@ func ExtractShortName(fqdn string) string {
 		return parts[0]
 	}
 	return fqdn
+}
+
+// AddEvidence adds evidence to a capability and creates the capability if needed
+func (n *Node) AddEvidence(capType CapabilityType, evidence Evidence) {
+	if n.Capabilities == nil {
+		n.Capabilities = make(map[CapabilityType]*Capability)
+	}
+
+	cap, exists := n.Capabilities[capType]
+	if !exists {
+		cap = &Capability{
+			Type:       capType,
+			Properties: make(map[string]any),
+		}
+		n.Capabilities[capType] = cap
+	}
+
+	cap.AddEvidence(evidence)
+}
+
+// GetCapability returns the capability for the given type, or nil if not found
+func (n *Node) GetCapability(capType CapabilityType) *Capability {
+	if n.Capabilities == nil {
+		return nil
+	}
+	return n.Capabilities[capType]
+}
+
+// GetConfidence returns the aggregate confidence for a capability, or 0 if not found
+func (n *Node) GetConfidence(capType CapabilityType) float64 {
+	cap := n.GetCapability(capType)
+	if cap == nil {
+		return 0
+	}
+	return cap.Confidence
+}
+
+// HasCapability checks if the node has the given capability above the minimum confidence threshold
+func (n *Node) HasCapability(capType CapabilityType, minConfidence float64) bool {
+	return n.GetConfidence(capType) >= minConfidence
 }

@@ -342,3 +342,124 @@ func (s *GraphService) validateEdge(edge *domain.Edge) error {
 	}
 	return nil
 }
+
+// MergeNodesAsInterfaces merges multiple nodes into a parent with interface children
+// The original nodes are converted to interface type with parent_id set
+// Edges to/from the original nodes are remapped to the corresponding interfaces
+func (s *GraphService) MergeNodesAsInterfaces(ctx context.Context, nodeIDs []string, parentID string, parentType domain.NodeType) ([]string, error) {
+	if len(nodeIDs) < 2 {
+		return nil, fmt.Errorf("at least 2 nodes required for merge")
+	}
+
+	// Check if parent ID already exists (conflict)
+	existing, err := s.repo.GetNode(ctx, parentID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to check for existing parent: %w", err)
+	}
+	if existing != nil {
+		return nil, fmt.Errorf("node with ID %s already exists", parentID)
+	}
+
+	// Fetch all nodes to merge
+	nodes := make([]*domain.Node, 0, len(nodeIDs))
+	for _, id := range nodeIDs {
+		node, err := s.repo.GetNode(ctx, id)
+		if err != nil {
+			return nil, fmt.Errorf("failed to get node %s: %w", id, err)
+		}
+		if node == nil {
+			return nil, fmt.Errorf("node %s not found", id)
+		}
+		nodes = append(nodes, node)
+	}
+
+	// Create parent node
+	parentNode := &domain.Node{
+		ID:     parentID,
+		Type:   parentType,
+		Label:  parentID,
+		Source: "merge",
+		Status: domain.NodeStatusVerified, // Inherit from children later if needed
+		Properties: map[string]any{
+			"interface_count": len(nodes),
+			"merged_from":     nodeIDs,
+		},
+	}
+
+	if err := s.repo.UpsertNode(ctx, parentNode); err != nil {
+		return nil, fmt.Errorf("failed to create parent node: %w", err)
+	}
+
+	// Convert each node to an interface
+	interfaceIDs := make([]string, 0, len(nodes))
+	for i, node := range nodes {
+		interfaceName := fmt.Sprintf("eth%d", i)
+		interfaceID := fmt.Sprintf("%s:%s", parentID, interfaceName)
+
+		// Create new interface node with data from original
+		interfaceNode := &domain.Node{
+			ID:         interfaceID,
+			Type:       domain.NodeTypeInterface,
+			Label:      interfaceName,
+			ParentID:   parentID,
+			Source:     node.Source,
+			Status:     node.Status,
+			Properties: node.Properties,
+			Discovered: node.Discovered,
+		}
+
+		// Add interface_name and original_id to properties
+		if interfaceNode.Properties == nil {
+			interfaceNode.Properties = make(map[string]any)
+		}
+		interfaceNode.Properties["interface_name"] = interfaceName
+		interfaceNode.Properties["original_id"] = node.ID
+
+		if err := s.repo.UpsertNode(ctx, interfaceNode); err != nil {
+			return nil, fmt.Errorf("failed to create interface node: %w", err)
+		}
+
+		interfaceIDs = append(interfaceIDs, interfaceID)
+
+		// Get edges connected to original node and remap them
+		edges, err := s.repo.ListEdges(ctx, "", node.ID, "")
+		if err != nil {
+			return nil, fmt.Errorf("failed to get edges for node %s: %w", node.ID, err)
+		}
+
+		for _, edge := range edges {
+			// Create new edge pointing to/from the interface
+			newEdge := edge
+			if edge.FromID == node.ID {
+				newEdge.FromID = interfaceID
+			}
+			if edge.ToID == node.ID {
+				newEdge.ToID = interfaceID
+			}
+			newEdge.ID = fmt.Sprintf("%s-%s", newEdge.FromID, newEdge.ToID)
+
+			if err := s.repo.UpsertEdge(ctx, &newEdge); err != nil {
+				return nil, fmt.Errorf("failed to remap edge: %w", err)
+			}
+		}
+
+		// Delete original node (edges will cascade)
+		if err := s.repo.DeleteNode(ctx, node.ID); err != nil {
+			return nil, fmt.Errorf("failed to delete original node %s: %w", node.ID, err)
+		}
+	}
+
+	// Publish graph update event
+	if s.eventBus != nil {
+		s.eventBus.Publish(Event{
+			Type: EventGraphUpdated,
+			Payload: map[string]any{
+				"action":     "merge",
+				"parent_id":  parentID,
+				"interfaces": interfaceIDs,
+			},
+		})
+	}
+
+	return interfaceIDs, nil
+}

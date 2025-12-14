@@ -69,13 +69,21 @@
                                 <path d="M9 9h6v6H9z"/>
                                 <path d="M9 2v4M15 2v4M9 18v4M15 18v4M2 9h4M2 15h4M18 9h4M18 15h4"/>
                             </svg>
-                            Scan Network
+                            Scan
                         </button>
                         <button class="dropdown-item" id="refresh-btn">
                             <svg class="dropdown-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                                 <path d="M21 2v6h-6M3 12a9 9 0 0 1 15-6.7L21 8M3 22v-6h6M21 12a9 9 0 0 1-15 6.7L3 16"/>
                             </svg>
                             Refresh
+                        </button>
+                        <div class="dropdown-divider"></div>
+                        <button class="dropdown-item" id="secrets-btn">
+                            <svg class="dropdown-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <rect x="3" y="11" width="18" height="11" rx="2" ry="2"/>
+                                <path d="M7 11V7a5 5 0 0 1 10 0v4"/>
+                            </svg>
+                            Manage Secrets
                         </button>
                         <div class="dropdown-divider"></div>
                         <button class="dropdown-item dropdown-item-danger" id="clear-btn">
@@ -152,17 +160,32 @@ all:
         </div>
     </div>
 
-    <!-- Scan Network Modal -->
+    <!-- Scan Modal -->
     <div class="modal-overlay" id="scan-modal">
         <div class="modal modal-small">
             <div class="modal-header">
-                <h2 class="modal-title">&gt; SCAN NETWORK SUBNET</h2>
+                <h2 class="modal-title">&gt; SCAN SUBNET</h2>
                 <button class="modal-close" id="scan-modal-close">&times;</button>
             </div>
             <div class="modal-body">
-                <label class="input-label">CIDR Range</label>
-                <input type="text" id="scan-cidr" class="text-input" placeholder="192.168.0.0/24" value="192.168.0.0/24">
-                <p class="input-hint">Enter a CIDR notation subnet to scan for live hosts.<br>Example: 192.168.0.0/24 (254 hosts)</p>
+                <label class="input-label">TARGET SUBNET</label>
+                <div class="scan-target-wrapper">
+                    <select id="scan-target-select" class="form-select">
+                        <option value="">Loading...</option>
+                    </select>
+                    <input type="text" id="scan-cidr" class="text-input" placeholder="192.168.0.0/24" style="display: none;">
+                </div>
+                <p class="input-hint" id="scan-hint">Select a detected subnet or enter a custom CIDR range.</p>
+
+                <!-- Discovery Mode Toggle -->
+                <div class="discovery-mode-toggle" id="discovery-mode-section" style="display: none;">
+                    <label class="checkbox-label">
+                        <input type="checkbox" id="discovery-mode-checkbox">
+                        <span class="checkbox-custom"></span>
+                        <span class="checkbox-text">DISCOVERY MODE</span>
+                    </label>
+                    <p class="discovery-mode-hint">Enable to show RFC1918 private network ranges for broader network discovery</p>
+                </div>
             </div>
             <div class="modal-footer">
                 <button class="header-button" id="scan-cancel">CANCEL</button>
@@ -254,6 +277,147 @@ all:
                 </div>
             </div>
         </div>
+    </div>
+
+    <!-- Merge Modal -->
+    <div class="modal-overlay" id="merge-modal">
+        <div class="modal modal-small">
+            <div class="modal-header">
+                <h2 class="modal-title">&gt; MERGE AS INTERFACES</h2>
+                <button class="modal-close" id="merge-modal-close">&times;</button>
+            </div>
+            <div class="modal-body">
+                <div class="merge-info">
+                    <p>Selected nodes will become interfaces of a parent node.</p>
+                    <div class="merge-selected-count">
+                        <span class="label">SELECTED:</span>
+                        <span class="value" id="merge-selected-count">0</span>
+                    </div>
+                </div>
+
+                <div class="form-group">
+                    <label class="form-label">PARENT IDENTITY</label>
+                    <input type="text" class="form-input" id="merge-parent-name" placeholder="e.g., brutus">
+                    <div class="form-hint">This becomes the parent node ID and label</div>
+                </div>
+
+                <div class="form-group">
+                    <label class="form-label">PARENT TYPE</label>
+                    <select class="form-select" id="merge-parent-type">
+                        <option value="server">Server</option>
+                        <option value="router">Router</option>
+                        <option value="switch">Switch</option>
+                        <option value="access_point">Access Point</option>
+                        <option value="vm">Virtual Machine</option>
+                        <option value="unknown">Unknown</option>
+                    </select>
+                </div>
+
+                <div class="merge-preview" id="merge-preview">
+                    <!-- Preview populated by JS -->
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="header-button" id="merge-cancel">CANCEL</button>
+                <button class="header-button header-button-primary" id="merge-submit">MERGE</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Secrets Management Modal -->
+    <div class="modal-overlay" id="secrets-modal">
+        <div class="modal modal-wide">
+            <div class="modal-header">
+                <h2 class="modal-title">&gt; MANAGE SECRETS</h2>
+                <button class="modal-close" id="secrets-modal-close">&times;</button>
+            </div>
+            <div class="modal-body">
+                <!-- Secrets Filter -->
+                <div class="secrets-toolbar">
+                    <div class="secrets-filter">
+                        <label class="filter-label">TYPE:</label>
+                        <select id="secrets-type-filter" class="form-select form-select-small">
+                            <option value="">ALL</option>
+                            <option value="ssh_key">SSH Key</option>
+                            <option value="snmp_community">SNMP Community</option>
+                            <option value="snmpv3">SNMPv3</option>
+                            <option value="api_token">API Token</option>
+                            <option value="dns">DNS Server</option>
+                            <option value="generic">Generic</option>
+                        </select>
+                    </div>
+                    <div class="secrets-filter">
+                        <label class="filter-label">SOURCE:</label>
+                        <select id="secrets-source-filter" class="form-select form-select-small">
+                            <option value="">ALL</option>
+                            <option value="mounted">MOUNTED</option>
+                            <option value="operator">OPERATOR</option>
+                        </select>
+                    </div>
+                    <button class="header-button header-button-small" id="secrets-add-btn">+ ADD SECRET</button>
+                </div>
+
+                <!-- Secrets List -->
+                <div class="secrets-list" id="secrets-list">
+                    <div class="secrets-loading">Loading secrets...</div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Add/Edit Secret Modal -->
+    <div class="modal-overlay" id="secret-edit-modal">
+        <div class="modal modal-small">
+            <div class="modal-header">
+                <h2 class="modal-title" id="secret-edit-title">&gt; ADD SECRET</h2>
+                <button class="modal-close" id="secret-edit-close">&times;</button>
+            </div>
+            <div class="modal-body">
+                <div class="form-group">
+                    <label class="form-label">SECRET ID</label>
+                    <input type="text" class="form-input" id="secret-edit-id" placeholder="e.g., ssh.homelab">
+                    <div class="form-hint">Unique identifier (lowercase, dots allowed)</div>
+                </div>
+
+                <div class="form-group">
+                    <label class="form-label">NAME</label>
+                    <input type="text" class="form-input" id="secret-edit-name" placeholder="e.g., Homelab SSH Key">
+                </div>
+
+                <div class="form-group">
+                    <label class="form-label">TYPE</label>
+                    <select class="form-select" id="secret-edit-type">
+                        <option value="ssh_key">SSH Key</option>
+                        <option value="snmp_community">SNMP Community</option>
+                        <option value="snmpv3">SNMPv3</option>
+                        <option value="api_token">API Token</option>
+                        <option value="dns">DNS Server</option>
+                        <option value="generic">Generic</option>
+                    </select>
+                </div>
+
+                <div class="form-group">
+                    <label class="form-label">DESCRIPTION</label>
+                    <input type="text" class="form-input" id="secret-edit-description" placeholder="Optional description">
+                </div>
+
+                <!-- Dynamic data fields based on type -->
+                <div id="secret-edit-data-fields">
+                    <!-- Populated dynamically by JS -->
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="header-button" id="secret-edit-cancel">CANCEL</button>
+                <button class="header-button header-button-primary" id="secret-edit-submit">SAVE</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Selection Toolbar (appears when nodes are multi-selected) -->
+    <div class="selection-toolbar hidden" id="selection-toolbar">
+        <span class="selection-count"><span id="selection-count-value">0</span> SELECTED</span>
+        <button class="header-button header-button-small" id="merge-selected-btn">MERGE AS INTERFACES</button>
+        <button class="header-button header-button-small header-button-danger" id="clear-selection-btn">CLEAR</button>
     </div>
 
     <!-- Discrepancy Panel -->

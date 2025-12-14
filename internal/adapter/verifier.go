@@ -91,6 +91,10 @@ type VerifierConfig struct {
 	EnableBannerGrab bool
 	// EnableARPLookup enables MAC address discovery
 	EnableARPLookup bool
+	// DNSServer is an optional DNS server to use for PTR lookups
+	DNSServer string
+	// CapabilityManager provides access to secrets for enhanced discovery
+	Capabilities *CapabilityManager
 }
 
 // DefaultVerifierConfig returns sensible defaults
@@ -392,12 +396,54 @@ func (v *VerifierAdapter) probePorts(ctx context.Context, ip string) (open, clos
 }
 
 // reverseDNS performs a reverse DNS lookup
+// Priority: 1) Static DNSServer config, 2) DNS capability from secrets, 3) System resolver
 func (v *VerifierAdapter) reverseDNS(ip string) string {
+	dnsServer := v.config.DNSServer
+
+	// If no static DNS configured, try to get from capabilities
+	if dnsServer == "" && v.config.Capabilities != nil {
+		if dnsCap, err := v.config.Capabilities.GetDNSCapability(context.Background()); err == nil && dnsCap != nil {
+			dnsServer = dnsCap.Server
+		}
+	}
+
+	if dnsServer != "" {
+		// Use custom DNS server for PTR lookup
+		return v.reverseDNSCustom(ip, dnsServer)
+	}
+
+	// Fall back to system resolver
 	names, err := net.LookupAddr(ip)
 	if err != nil || len(names) == 0 {
 		return ""
 	}
 	// Remove trailing dot from FQDN
+	hostname := names[0]
+	if len(hostname) > 0 && hostname[len(hostname)-1] == '.' {
+		hostname = hostname[:len(hostname)-1]
+	}
+	return hostname
+}
+
+// reverseDNSCustom performs PTR lookup against a specific DNS server
+func (v *VerifierAdapter) reverseDNSCustom(ip, dnsServer string) string {
+	// Create a custom resolver
+	resolver := &net.Resolver{
+		PreferGo: true,
+		Dial: func(ctx context.Context, network, address string) (net.Conn, error) {
+			d := net.Dialer{Timeout: v.config.PingTimeout}
+			return d.DialContext(ctx, "udp", dnsServer+":53")
+		},
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), v.config.PingTimeout*2)
+	defer cancel()
+
+	names, err := resolver.LookupAddr(ctx, ip)
+	if err != nil || len(names) == 0 {
+		return ""
+	}
+
 	hostname := names[0]
 	if len(hostname) > 0 && hostname[len(hostname)-1] == '.' {
 		hostname = hostname[:len(hostname)-1]

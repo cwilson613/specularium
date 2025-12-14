@@ -1,26 +1,25 @@
 # Build stage
-FROM golang:1.22-alpine AS builder
+FROM golang:1.24-alpine AS builder
 
-# Install build dependencies for CGO (SQLite)
-RUN apk add --no-cache gcc musl-dev
-
+# No CGO needed - pure Go SQLite driver
 WORKDIR /app
 
 # Copy go mod files and download dependencies
-COPY go.mod ./
+COPY go.mod go.sum ./
 RUN go mod download
 
 # Copy source code
 COPY . .
 
-# Tidy modules and build the application with CGO enabled for SQLite
-RUN go mod tidy && CGO_ENABLED=1 GOOS=linux go build -o specularium -ldflags="-s -w" ./cmd/server
+# Build static binary (no CGO)
+RUN CGO_ENABLED=0 GOOS=linux go build -o specularium -ldflags="-s -w" ./cmd/server
 
 # Production stage
 FROM alpine:3.19
 
 # Install runtime dependencies
-RUN apk add --no-cache ca-certificates sqlite-libs tzdata
+# nmap for service fingerprinting (discovery mode only)
+RUN apk add --no-cache ca-certificates tzdata nmap nmap-scripts
 
 WORKDIR /app
 
