@@ -277,6 +277,52 @@ Specularium uses `modernc.org/sqlite`, a pure-Go SQLite implementation:
 
 Build with `CGO_ENABLED=0` for all targets.
 
+## Bootstrap System
+
+Specularium uses evidence-based self-discovery at startup (`internal/core/bootstrap/`):
+
+### Evidence Categories
+
+| Category | What's Detected |
+|----------|----------------|
+| `environment` | Container runtime (K8s, Docker, Podman, containerd, CRI-O, LXC), VM, bare metal |
+| `resources` | CPU cores, memory, architecture, cgroup limits |
+| `permissions` | UID, ICMP capability, raw sockets, procfs access, nmap availability |
+| `network` | Hostname, interfaces, gateway, DNS servers, local subnet |
+| `capability` | Binary availability, socket creation, port binding |
+
+### Evidence Confidence
+
+Every finding has a confidence score (0.0-1.0) and method description:
+
+```go
+evidence := NewEvidence(CategoryEnvironment, "container_runtime", "kubernetes", 0.95, "filesystem", "Service account token exists")
+```
+
+Corroborating evidence boosts confidence (diminishing returns).
+
+### Mode Recommendation
+
+The bootstrap synthesizes a mode recommendation based on all evidence:
+
+| Condition | Recommended Mode |
+|-----------|-----------------|
+| Memory < 128MB | `passive` |
+| No nmap | `monitor` |
+| Memory >= 512MB + nmap | `discovery` |
+
+Override with `mode:` in config (warns if exceeding recommendation).
+
+### Self Node
+
+Bootstrap creates a "self" node (`NodeTypeSelf`) containing:
+- Environment type and runtime
+- Resource metrics
+- Permission capabilities
+- Recommendation with reasons
+
+Force re-bootstrap with `--bootstrap` flag.
+
 ## Notes
 
 - Frontend uses vis-network from CDN with circularImage nodes
