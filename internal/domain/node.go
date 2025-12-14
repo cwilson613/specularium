@@ -17,6 +17,7 @@ const (
 	NodeTypeVIP         NodeType = "vip"
 	NodeTypeContainer   NodeType = "container"
 	NodeTypeInterface   NodeType = "interface" // Network interface, USB port, radio, etc. (child of parent node)
+	NodeTypeSelf        NodeType = "self"      // This Specularium instance
 	NodeTypeUnknown     NodeType = "unknown"
 )
 

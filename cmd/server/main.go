@@ -15,6 +15,7 @@ import (
 
 	"specularium/internal/adapter"
 	"specularium/internal/config"
+	"specularium/internal/core/bootstrap"
 	"specularium/internal/domain"
 	"specularium/internal/handler"
 	"specularium/internal/hub"
@@ -241,30 +242,38 @@ func main() {
 		log.Printf("Warning: Bootstrap discovery failed: %v", err)
 	}
 
-	// Persist bootstrap results to config if needed
+	// Run evidence-based bootstrap if needed
 	if cfg.NeedsBootstrap() || *forceBootstrap {
-		bootstrapResult := config.BuildBootstrapResult(
-			bootstrapAdapter.GetEnvironment(),
-			bootstrapAdapter.GetResources(),
-			bootstrapAdapter.GetPermissions(),
-		)
-		cfg.SetBootstrapResult(bootstrapResult)
+		log.Println("Running evidence-based self-discovery...")
+		result, err := bootstrap.Run(context.Background())
+		if err != nil {
+			log.Printf("Warning: Bootstrap failed: %v", err)
+		} else {
+			// Convert to config-compatible format and save
+			bootstrapResult := result.ToConfigBootstrap()
+			cfg.SetBootstrapResult(bootstrapResult)
 
-		// Save updated config
-		if configPath != "" {
-			if err := cfg.Save(configPath); err != nil {
-				log.Printf("Warning: Failed to save bootstrap results to config: %v", err)
-			} else {
-				log.Printf("Bootstrap results saved to: %s", configPath)
-				log.Printf("Recommended mode: %s (confidence: %.0f%%)",
-					bootstrapResult.Recommendation.Mode,
-					bootstrapResult.Recommendation.Confidence*100)
+			// Save updated config
+			if configPath != "" {
+				if err := cfg.Save(configPath); err != nil {
+					log.Printf("Warning: Failed to save bootstrap results to config: %v", err)
+				} else {
+					log.Printf("Bootstrap results saved to: %s", configPath)
+				}
 			}
-		}
 
-		// Update effective mode now that we have bootstrap recommendation
-		effectiveMode = cfg.EffectiveMode()
-		log.Printf("Effective mode after bootstrap: %s", effectiveMode)
+			// Create "self" node representing this Specularium instance
+			selfNode := createSelfNode(bootstrapResult)
+			if err := repo.CreateNode(context.Background(), &selfNode); err != nil {
+				log.Printf("Warning: Failed to create self node: %v", err)
+			} else {
+				log.Printf("Created self node: %s", selfNode.ID)
+			}
+
+			// Update effective mode now that we have bootstrap recommendation
+			effectiveMode = cfg.EffectiveMode()
+			log.Printf("Effective mode after bootstrap: %s", effectiveMode)
+		}
 	}
 
 	// Start adapter registry
@@ -545,4 +554,51 @@ func (b *bootstrapService) GetSuggestedScanTargets() []string {
 // GetScanTargets returns categorized scan targets (primary and discovery)
 func (b *bootstrapService) GetScanTargets() domain.ScanTargets {
 	return b.bootstrap.GetScanTargets()
+}
+
+// createSelfNode creates a node representing this Specularium instance
+func createSelfNode(br *config.BootstrapResult) domain.Node {
+	now := time.Now()
+
+	properties := map[string]any{
+		"is_self":      true,
+		"hostname":     br.Network.Hostname,
+		"architecture": br.Resources.Architecture,
+		"cpu_cores":    br.Resources.CPUCores,
+		"memory_mb":    br.Resources.MemoryMB,
+	}
+
+	discovered := map[string]any{
+		"environment": map[string]any{
+			"type":       br.Environment.Type,
+			"runtime":    br.Environment.Runtime,
+			"confidence": br.Environment.Confidence,
+		},
+		"permissions": map[string]any{
+			"can_icmp_ping":   br.Permissions.CanICMPPing,
+			"can_raw_socket":  br.Permissions.CanRawSocket,
+			"can_read_procfs": br.Permissions.CanReadProcFS,
+			"effective_uid":   br.Permissions.EffectiveUID,
+			"effective_user":  br.Permissions.EffectiveUser,
+		},
+		"recommendation": map[string]any{
+			"mode":       string(br.Recommendation.Mode),
+			"confidence": br.Recommendation.Confidence,
+			"reasons":    br.Recommendation.Reasons,
+		},
+	}
+
+	node := domain.Node{
+		ID:         "self",
+		Type:       domain.NodeTypeSelf,
+		Label:      br.Network.Hostname,
+		Source:     "bootstrap",
+		Status:     domain.NodeStatusVerified,
+		Properties: properties,
+		Discovered: discovered,
+	}
+	node.LastVerified = &now
+	node.LastSeen = &now
+
+	return node
 }
