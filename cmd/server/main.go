@@ -243,14 +243,10 @@ func main() {
 
 	// Persist bootstrap results to config if needed
 	if cfg.NeedsBootstrap() || *forceBootstrap {
-		env := bootstrapAdapter.GetEnvironment()
 		bootstrapResult := config.BuildBootstrapResult(
-			env.Hostname,
-			env.InKubernetes,
-			env.InDocker,
-			env.DefaultGateway,
-			env.DNSServers,
-			env.LocalSubnet,
+			bootstrapAdapter.GetEnvironment(),
+			bootstrapAdapter.GetResources(),
+			bootstrapAdapter.GetPermissions(),
 		)
 		cfg.SetBootstrapResult(bootstrapResult)
 

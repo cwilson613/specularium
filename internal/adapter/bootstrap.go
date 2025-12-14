@@ -6,17 +6,24 @@ import (
 	"log"
 	"net"
 	"os"
+	"os/user"
+	"runtime"
+	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
+	"specularium/internal/config"
 	"specularium/internal/domain"
 )
 
 // BootstrapAdapter performs initial self-discovery on startup
 // It detects the deployment environment and expands knowledge outward
 type BootstrapAdapter struct {
-	publisher EventPublisher
-	env       domain.EnvironmentInfo
+	publisher   EventPublisher
+	env         domain.EnvironmentInfo
+	resources   *config.ResourceInfo
+	permissions *config.PermissionInfo
 }
 
 // NewBootstrapAdapter creates a new bootstrap adapter
@@ -47,6 +54,9 @@ func (b *BootstrapAdapter) Priority() int {
 // Start performs initial environment detection
 func (b *BootstrapAdapter) Start(ctx context.Context) error {
 	b.env = b.detectEnvironment()
+	b.resources = b.detectResources()
+	b.permissions = b.probePermissions()
+
 	log.Printf("Bootstrap: Environment detected - K8s=%v, Docker=%v, Hostname=%s",
 		b.env.InKubernetes, b.env.InDocker, b.env.Hostname)
 	if b.env.InKubernetes {
@@ -55,6 +65,11 @@ func (b *BootstrapAdapter) Start(ctx context.Context) error {
 	}
 	log.Printf("Bootstrap: Network context - Gateway=%s, DNS=%v, Subnet=%s",
 		b.env.DefaultGateway, b.env.DNSServers, b.env.LocalSubnet)
+	log.Printf("Bootstrap: Resources - CPUs=%d, Memory=%dMB, Arch=%s",
+		b.resources.CPUCores, b.resources.MemoryMB, b.resources.Architecture)
+	log.Printf("Bootstrap: Permissions - ICMP=%v, RawSocket=%v, UID=%d (%s)",
+		b.permissions.CanICMPPing, b.permissions.CanRawSocket,
+		b.permissions.EffectiveUID, b.permissions.EffectiveUser)
 	return nil
 }
 
@@ -130,6 +145,16 @@ func (b *BootstrapAdapter) Bootstrap(ctx context.Context) (*domain.GraphFragment
 // GetEnvironment returns the detected environment info
 func (b *BootstrapAdapter) GetEnvironment() domain.EnvironmentInfo {
 	return b.env
+}
+
+// GetResources returns the detected resource info
+func (b *BootstrapAdapter) GetResources() *config.ResourceInfo {
+	return b.resources
+}
+
+// GetPermissions returns the probed permission info
+func (b *BootstrapAdapter) GetPermissions() *config.PermissionInfo {
+	return b.permissions
 }
 
 // GetSuggestedScanTargets returns network ranges to scan based on environment
@@ -747,6 +772,105 @@ func (b *BootstrapAdapter) createInfrastructureEdges(selfID string, nodes []doma
 	}
 
 	return edges
+}
+
+// detectResources detects available system resources
+func (b *BootstrapAdapter) detectResources() *config.ResourceInfo {
+	resources := &config.ResourceInfo{
+		CPUCores:     runtime.NumCPU(),
+		Architecture: runtime.GOARCH,
+	}
+
+	// Detect memory from /proc/meminfo (Linux)
+	if data, err := os.ReadFile("/proc/meminfo"); err == nil {
+		for _, line := range strings.Split(string(data), "\n") {
+			if strings.HasPrefix(line, "MemTotal:") {
+				fields := strings.Fields(line)
+				if len(fields) >= 2 {
+					if kb, err := strconv.ParseInt(fields[1], 10, 64); err == nil {
+						resources.MemoryMB = int(kb / 1024)
+					}
+				}
+				break
+			}
+		}
+	}
+
+	// Fallback: try sysconf
+	if resources.MemoryMB == 0 {
+		// Use a reasonable default if we can't detect
+		resources.MemoryMB = 1024
+	}
+
+	return resources
+}
+
+// probePermissions probes available permissions and capabilities
+func (b *BootstrapAdapter) probePermissions() *config.PermissionInfo {
+	perms := &config.PermissionInfo{
+		EffectiveUID: os.Getuid(),
+	}
+
+	// Get effective user name
+	if u, err := user.Current(); err == nil {
+		perms.EffectiveUser = u.Username
+	} else {
+		perms.EffectiveUser = fmt.Sprintf("uid:%d", perms.EffectiveUID)
+	}
+
+	// Probe ICMP capability by trying to open raw socket
+	perms.CanICMPPing = b.probeICMPCapability()
+
+	// Probe raw socket capability
+	perms.CanRawSocket = b.probeRawSocketCapability()
+
+	// Probe procfs access
+	perms.CanReadProcFS = b.probeProcFSAccess()
+
+	return perms
+}
+
+// probeICMPCapability tests if we can send ICMP packets
+func (b *BootstrapAdapter) probeICMPCapability() bool {
+	// Try to create an ICMP socket (requires CAP_NET_RAW or root)
+	fd, err := syscall.Socket(syscall.AF_INET, syscall.SOCK_RAW, syscall.IPPROTO_ICMP)
+	if err == nil {
+		syscall.Close(fd)
+		return true
+	}
+
+	// Also try unprivileged ICMP (SOCK_DGRAM, requires net.ipv4.ping_group_range)
+	fd, err = syscall.Socket(syscall.AF_INET, syscall.SOCK_DGRAM, syscall.IPPROTO_ICMP)
+	if err == nil {
+		syscall.Close(fd)
+		return true
+	}
+
+	return false
+}
+
+// probeRawSocketCapability tests if we can create raw sockets
+func (b *BootstrapAdapter) probeRawSocketCapability() bool {
+	// Try to create a raw socket
+	fd, err := syscall.Socket(syscall.AF_INET, syscall.SOCK_RAW, syscall.IPPROTO_RAW)
+	if err == nil {
+		syscall.Close(fd)
+		return true
+	}
+	return false
+}
+
+// probeProcFSAccess tests if we can read /proc filesystem
+func (b *BootstrapAdapter) probeProcFSAccess() bool {
+	// Try to read /proc/net/tcp (commonly needed for connection monitoring)
+	if _, err := os.ReadFile("/proc/net/tcp"); err == nil {
+		return true
+	}
+	// At minimum, check if /proc exists
+	if _, err := os.Stat("/proc"); err == nil {
+		return true
+	}
+	return false
 }
 
 // publishProgress emits a discovery progress event

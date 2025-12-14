@@ -17,6 +17,8 @@ import (
 	"time"
 
 	"gopkg.in/yaml.v3"
+
+	"specularium/internal/domain"
 )
 
 // Load finds and loads the config file, or returns defaults if none found
@@ -192,57 +194,118 @@ func NewBootstrapResult() *BootstrapResult {
 }
 
 // BuildBootstrapResult constructs a BootstrapResult from detected environment
-func BuildBootstrapResult(hostname string, inK8s, inDocker bool, gateway string, dnsServers []string, localSubnet string) *BootstrapResult {
+// Takes full domain.EnvironmentInfo and optional resource/permission info
+func BuildBootstrapResult(env domain.EnvironmentInfo, resources *ResourceInfo, permissions *PermissionInfo) *BootstrapResult {
 	result := NewBootstrapResult()
 
-	// Determine environment type
-	envType := "bare_metal"
-	runtime := "none"
-	confidence := 0.7
-
-	if inK8s {
-		envType = "container"
-		runtime = "kubernetes"
-		confidence = 0.95
-	} else if inDocker {
-		envType = "container"
-		runtime = "docker"
-		confidence = 0.9
-	}
+	// Use heuristic signature detection
+	detection := DetectEnvironmentType(env)
 
 	result.Environment = EnvironmentInfo{
-		Type:       envType,
-		Runtime:    runtime,
-		Confidence: confidence,
+		Type:       string(detection.Type),
+		Runtime:    string(detection.Runtime),
+		Confidence: detection.Confidence,
 	}
 
-	// Network info
+	// Network info from environment
 	result.Network = NetworkInfo{
-		Hostname:   hostname,
-		Gateway:    gateway,
-		DNSServers: dnsServers,
+		Hostname:   env.Hostname,
+		Gateway:    env.DefaultGateway,
+		DNSServers: env.DNSServers,
 	}
 
-	// Recommend mode based on environment
+	// Add interface info if we have local subnet
+	if env.LocalSubnet != "" {
+		result.Network.Interfaces = []InterfaceInfo{
+			{Name: "primary", Subnet: env.LocalSubnet},
+		}
+	}
+
+	// Resources (if provided)
+	if resources != nil {
+		result.Resources = *resources
+	}
+
+	// Permissions (if provided)
+	if permissions != nil {
+		result.Permissions = *permissions
+	}
+
+	// Build mode recommendation using all available signals
+	result.Recommendation = buildModeRecommendation(detection, resources, permissions)
+
+	return result
+}
+
+// buildModeRecommendation determines the recommended mode based on environment, resources, and permissions
+func buildModeRecommendation(detection DetectionResult, resources *ResourceInfo, permissions *PermissionInfo) ModeRecommendation {
 	mode := ModeMonitor
-	reasons := []string{}
+	confidence := detection.Confidence
+	reasons := append([]string{}, detection.Reasons...)
 
-	if inK8s {
-		mode = ModeMonitor
-		reasons = append(reasons, "Running in Kubernetes - limited network visibility")
-	} else if inDocker {
-		mode = ModeMonitor
-		reasons = append(reasons, "Running in Docker - network access may be limited")
-	} else {
+	// Container environment analysis
+	if detection.Type == EnvTypeContainerized {
+		switch detection.Runtime {
+		case RuntimeKubernetes:
+			mode = ModeMonitor
+			reasons = append(reasons, "Kubernetes pod - network visibility limited to cluster")
+		case RuntimeDocker, RuntimePodman, RuntimeContainerd, RuntimeCRIO:
+			mode = ModeMonitor
+			reasons = append(reasons, "Container - network access depends on configuration")
+		case RuntimeLXC:
+			// LXC often has more network access than Docker
+			mode = ModeMonitor
+			reasons = append(reasons, "LXC container - may have host network access")
+		}
+	} else if detection.Type == EnvTypeVM {
 		mode = ModeDiscovery
-		reasons = append(reasons, "Running on bare metal - full network access available")
+		confidence = 0.8
+		reasons = append(reasons, "VM detected - full network access likely available")
+	} else {
+		// Bare metal - highest capability
+		mode = ModeDiscovery
+		confidence = 0.85
+		reasons = append(reasons, "Bare metal host - full network access available")
 	}
 
-	result.Recommendation = ModeRecommendation{
+	// Permission-based adjustments
+	if permissions != nil {
+		if permissions.CanRawSocket && permissions.CanICMPPing {
+			// Full network capabilities
+			if mode == ModeMonitor && detection.Type != EnvTypeContainerized {
+				mode = ModeDiscovery
+				reasons = append(reasons, "Raw socket and ICMP available - upgrading to discovery")
+			}
+		} else if !permissions.CanRawSocket {
+			// Limited capabilities, stay in monitor mode
+			if mode == ModeDiscovery {
+				mode = ModeMonitor
+				confidence *= 0.9
+				reasons = append(reasons, "No raw socket access - limiting to monitor mode")
+			}
+		}
+
+		if permissions.EffectiveUID == 0 {
+			reasons = append(reasons, "Running as root - elevated privileges available")
+		}
+	}
+
+	// Resource-based adjustments
+	if resources != nil {
+		if resources.MemoryMB < 256 {
+			// Very constrained - prefer passive mode
+			mode = ModePassive
+			confidence *= 0.85
+			reasons = append(reasons, "Low memory (<256MB) - recommending passive mode")
+		} else if resources.MemoryMB < 512 && mode == ModeDiscovery {
+			mode = ModeMonitor
+			reasons = append(reasons, "Limited memory (<512MB) - limiting to monitor mode")
+		}
+	}
+
+	return ModeRecommendation{
 		Mode:       mode,
 		Confidence: confidence,
 		Reasons:    reasons,
 	}
-
-	return result
 }
