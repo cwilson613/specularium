@@ -9,7 +9,7 @@ import (
 
 	"specularium/internal/domain"
 
-	_ "github.com/mattn/go-sqlite3"
+	_ "modernc.org/sqlite" // Pure-Go SQLite driver (no CGO)
 )
 
 // Repository implements repository operations using SQLite
@@ -19,7 +19,9 @@ type Repository struct {
 
 // New creates a new SQLite repository
 func New(dbPath string) (*Repository, error) {
-	db, err := sql.Open("sqlite3", dbPath+"?_journal_mode=WAL&_busy_timeout=5000")
+	// Pure-Go driver uses "sqlite" and _pragma=name(value) syntax
+	dsn := dbPath + "?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)"
+	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open database: %w", err)
 	}
@@ -100,10 +102,40 @@ func (r *Repository) migrate() error {
 	r.addColumnIfNotExists("nodes", "truth_status", "TEXT DEFAULT ''")
 	r.addColumnIfNotExists("nodes", "has_discrepancy", "INTEGER DEFAULT 0")
 
+	// Parent-child relationship for interface nodes
+	r.addColumnIfNotExists("nodes", "parent_id", "TEXT")
+
+	// Capabilities column for Evidence Model
+	r.addColumnIfNotExists("nodes", "capabilities", "TEXT")
+
 	// Create indexes if not exists
 	r.db.Exec(`CREATE INDEX IF NOT EXISTS idx_nodes_status ON nodes(status)`)
+	r.db.Exec(`CREATE INDEX IF NOT EXISTS idx_nodes_parent ON nodes(parent_id)`)
 	r.db.Exec(`CREATE INDEX IF NOT EXISTS idx_nodes_truth_status ON nodes(truth_status)`)
 	r.db.Exec(`CREATE INDEX IF NOT EXISTS idx_discrepancies_unresolved ON discrepancies(node_id) WHERE resolved_at IS NULL`)
+
+	// Secrets table for operator-created secrets
+	secretsSchema := `
+	CREATE TABLE IF NOT EXISTS secrets (
+		id TEXT PRIMARY KEY,
+		name TEXT NOT NULL,
+		type TEXT NOT NULL,
+		source TEXT NOT NULL DEFAULT 'operator',
+		description TEXT,
+		data TEXT,
+		metadata TEXT,
+		immutable INTEGER DEFAULT 0,
+		status TEXT DEFAULT 'unknown',
+		status_message TEXT,
+		usage_count INTEGER DEFAULT 0,
+		last_used_at DATETIME,
+		created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+		updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+	);
+	CREATE INDEX IF NOT EXISTS idx_secrets_type ON secrets(type);
+	CREATE INDEX IF NOT EXISTS idx_secrets_source ON secrets(source);
+	`
+	r.db.Exec(secretsSchema)
 
 	return nil
 }
@@ -153,80 +185,26 @@ func (r *Repository) GetGraph(ctx context.Context) (*domain.Graph, error) {
 
 // GetNode retrieves a single node by ID
 func (r *Repository) GetNode(ctx context.Context, id string) (*domain.Node, error) {
-	var (
-		nodeType, label           string
-		source, status            sql.NullString
-		propertiesJSON            sql.NullString
-		discoveredJSON            sql.NullString
-		truthJSON                 sql.NullString
-		truthStatus               sql.NullString
-		hasDiscrepancy            sql.NullInt64
-		lastVerified, lastSeen    sql.NullTime
-		createdAt, updatedAt      time.Time
-	)
+	var row nodeRow
+	row.ID = id
 
-	err := r.db.QueryRowContext(ctx, `
-		SELECT type, label, properties, source, status, last_verified, last_seen, discovered,
-		       truth, truth_status, has_discrepancy, created_at, updated_at
-		FROM nodes WHERE id = ?
-	`, id).Scan(&nodeType, &label, &propertiesJSON, &source, &status, &lastVerified, &lastSeen, &discoveredJSON,
-		&truthJSON, &truthStatus, &hasDiscrepancy, &createdAt, &updatedAt)
+	err := r.db.QueryRowContext(ctx,
+		`SELECT `+nodeColumns+` FROM nodes WHERE id = ?`, id,
+	).Scan(row.scanArgs()...)
 
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
 	if err != nil {
-		return nil, fmt.Errorf("failed to query node: %w", err)
+		return nil, fmt.Errorf("query node: %w", err)
 	}
 
-	node := &domain.Node{
-		ID:             id,
-		Type:           domain.NodeType(nodeType),
-		Label:          label,
-		Source:         source.String,
-		Status:         domain.NodeStatus(status.String),
-		TruthStatus:    domain.TruthStatus(truthStatus.String),
-		HasDiscrepancy: hasDiscrepancy.Valid && hasDiscrepancy.Int64 == 1,
-		CreatedAt:      createdAt,
-		UpdatedAt:      updatedAt,
-	}
-
-	if node.Status == "" {
-		node.Status = domain.NodeStatusUnverified
-	}
-
-	if lastVerified.Valid {
-		node.LastVerified = &lastVerified.Time
-	}
-	if lastSeen.Valid {
-		node.LastSeen = &lastSeen.Time
-	}
-
-	if propertiesJSON.Valid && propertiesJSON.String != "" {
-		if err := json.Unmarshal([]byte(propertiesJSON.String), &node.Properties); err != nil {
-			return nil, fmt.Errorf("failed to unmarshal properties: %w", err)
-		}
-	}
-
-	if discoveredJSON.Valid && discoveredJSON.String != "" {
-		if err := json.Unmarshal([]byte(discoveredJSON.String), &node.Discovered); err != nil {
-			return nil, fmt.Errorf("failed to unmarshal discovered: %w", err)
-		}
-	}
-
-	if truthJSON.Valid && truthJSON.String != "" {
-		node.Truth = &domain.NodeTruth{}
-		if err := json.Unmarshal([]byte(truthJSON.String), node.Truth); err != nil {
-			return nil, fmt.Errorf("failed to unmarshal truth: %w", err)
-		}
-	}
-
-	return node, nil
+	return row.toDomain()
 }
 
 // ListNodes returns all nodes, optionally filtered by type or source
 func (r *Repository) ListNodes(ctx context.Context, nodeType, source string) ([]domain.Node, error) {
-	query := "SELECT id, type, label, properties, source, status, last_verified, last_seen, discovered, truth, truth_status, has_discrepancy, created_at, updated_at FROM nodes WHERE 1=1"
+	query := "SELECT " + nodeColumns + " FROM nodes WHERE 1=1"
 	args := make([]interface{}, 0)
 
 	if nodeType != "" {
@@ -240,73 +218,27 @@ func (r *Repository) ListNodes(ctx context.Context, nodeType, source string) ([]
 
 	rows, err := r.db.QueryContext(ctx, query, args...)
 	if err != nil {
-		return nil, fmt.Errorf("failed to query nodes: %w", err)
+		return nil, fmt.Errorf("query nodes: %w", err)
 	}
 	defer rows.Close()
 
+	return scanNodeRows(rows)
+}
+
+// scanNodeRows scans multiple node rows into a slice
+func scanNodeRows(rows *sql.Rows) ([]domain.Node, error) {
 	nodes := make([]domain.Node, 0)
 	for rows.Next() {
-		var (
-			id, nodeType, label       string
-			src, status               sql.NullString
-			propertiesJSON            sql.NullString
-			discoveredJSON            sql.NullString
-			truthJSON                 sql.NullString
-			truthStatus               sql.NullString
-			hasDiscrepancy            sql.NullInt64
-			lastVerified, lastSeen    sql.NullTime
-			createdAt, updatedAt      time.Time
-		)
-
-		if err := rows.Scan(&id, &nodeType, &label, &propertiesJSON, &src, &status, &lastVerified, &lastSeen, &discoveredJSON, &truthJSON, &truthStatus, &hasDiscrepancy, &createdAt, &updatedAt); err != nil {
-			return nil, fmt.Errorf("failed to scan node: %w", err)
+		var row nodeRow
+		if err := rows.Scan(row.scanArgs()...); err != nil {
+			return nil, fmt.Errorf("scan node: %w", err)
 		}
-
-		node := domain.Node{
-			ID:             id,
-			Type:           domain.NodeType(nodeType),
-			Label:          label,
-			Source:         src.String,
-			Status:         domain.NodeStatus(status.String),
-			TruthStatus:    domain.TruthStatus(truthStatus.String),
-			HasDiscrepancy: hasDiscrepancy.Valid && hasDiscrepancy.Int64 == 1,
-			CreatedAt:      createdAt,
-			UpdatedAt:      updatedAt,
+		node, err := row.toDomain()
+		if err != nil {
+			return nil, err
 		}
-
-		if node.Status == "" {
-			node.Status = domain.NodeStatusUnverified
-		}
-
-		if lastVerified.Valid {
-			node.LastVerified = &lastVerified.Time
-		}
-		if lastSeen.Valid {
-			node.LastSeen = &lastSeen.Time
-		}
-
-		if propertiesJSON.Valid && propertiesJSON.String != "" {
-			if err := json.Unmarshal([]byte(propertiesJSON.String), &node.Properties); err != nil {
-				return nil, fmt.Errorf("failed to unmarshal properties: %w", err)
-			}
-		}
-
-		if discoveredJSON.Valid && discoveredJSON.String != "" {
-			if err := json.Unmarshal([]byte(discoveredJSON.String), &node.Discovered); err != nil {
-				return nil, fmt.Errorf("failed to unmarshal discovered: %w", err)
-			}
-		}
-
-		if truthJSON.Valid && truthJSON.String != "" {
-			node.Truth = &domain.NodeTruth{}
-			if err := json.Unmarshal([]byte(truthJSON.String), node.Truth); err != nil {
-				return nil, fmt.Errorf("failed to unmarshal truth: %w", err)
-			}
-		}
-
-		nodes = append(nodes, node)
+		nodes = append(nodes, *node)
 	}
-
 	return nodes, rows.Err()
 }
 
@@ -326,24 +258,6 @@ func (r *Repository) CreateNode(ctx context.Context, node *domain.Node) error {
 
 // UpsertNode inserts or updates a node
 func (r *Repository) UpsertNode(ctx context.Context, node *domain.Node) error {
-	var propertiesJSON sql.NullString
-	if node.Properties != nil && len(node.Properties) > 0 {
-		data, err := json.Marshal(node.Properties)
-		if err != nil {
-			return fmt.Errorf("failed to marshal properties: %w", err)
-		}
-		propertiesJSON = sql.NullString{String: string(data), Valid: true}
-	}
-
-	var discoveredJSON sql.NullString
-	if node.Discovered != nil && len(node.Discovered) > 0 {
-		data, err := json.Marshal(node.Discovered)
-		if err != nil {
-			return fmt.Errorf("failed to marshal discovered: %w", err)
-		}
-		discoveredJSON = sql.NullString{String: string(data), Valid: true}
-	}
-
 	now := time.Now()
 	if node.CreatedAt.IsZero() {
 		node.CreatedAt = now
@@ -354,31 +268,30 @@ func (r *Repository) UpsertNode(ctx context.Context, node *domain.Node) error {
 		node.Status = domain.NodeStatusUnverified
 	}
 
-	var lastVerified, lastSeen sql.NullTime
-	if node.LastVerified != nil {
-		lastVerified = sql.NullTime{Time: *node.LastVerified, Valid: true}
-	}
-	if node.LastSeen != nil {
-		lastSeen = sql.NullTime{Time: *node.LastSeen, Valid: true}
+	args, err := nodeInsertArgs(node)
+	if err != nil {
+		return fmt.Errorf("prepare node args: %w", err)
 	}
 
-	_, err := r.db.ExecContext(ctx, `
-		INSERT INTO nodes (id, type, label, properties, source, status, last_verified, last_seen, discovered, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	_, err = r.db.ExecContext(ctx, `
+		INSERT INTO nodes (id, type, label, parent_id, properties, source, status, last_verified, last_seen, discovered, capabilities, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(id) DO UPDATE SET
 			type = excluded.type,
 			label = excluded.label,
+			parent_id = excluded.parent_id,
 			properties = excluded.properties,
 			source = excluded.source,
 			status = excluded.status,
 			last_verified = excluded.last_verified,
 			last_seen = excluded.last_seen,
 			discovered = excluded.discovered,
+			capabilities = excluded.capabilities,
 			updated_at = excluded.updated_at
-	`, node.ID, node.Type, node.Label, propertiesJSON, node.Source, node.Status, lastVerified, lastSeen, discoveredJSON, node.CreatedAt, node.UpdatedAt)
+	`, args...)
 
 	if err != nil {
-		return fmt.Errorf("failed to upsert node: %w", err)
+		return fmt.Errorf("upsert node: %w", err)
 	}
 
 	return nil
@@ -405,6 +318,9 @@ func (r *Repository) UpdateNode(ctx context.Context, id string, updates map[stri
 	if source, ok := updates["source"].(string); ok {
 		existing.Source = source
 	}
+	if parentID, ok := updates["parent_id"].(string); ok {
+		existing.ParentID = parentID
+	}
 	if props, ok := updates["properties"].(map[string]interface{}); ok {
 		if existing.Properties == nil {
 			existing.Properties = make(map[string]any)
@@ -416,6 +332,37 @@ func (r *Repository) UpdateNode(ctx context.Context, id string, updates map[stri
 				existing.Properties[k] = v
 			}
 		}
+	}
+	if discovered, ok := updates["discovered"].(map[string]any); ok {
+		if existing.Discovered == nil {
+			existing.Discovered = make(map[string]any)
+		}
+		for k, v := range discovered {
+			if v == nil {
+				delete(existing.Discovered, k)
+			} else {
+				existing.Discovered[k] = v
+			}
+		}
+	}
+	if capabilities, ok := updates["capabilities"].(map[string]interface{}); ok {
+		// Convert to map[CapabilityType]*Capability
+		if existing.Capabilities == nil {
+			existing.Capabilities = make(map[domain.CapabilityType]*domain.Capability)
+		}
+		// This allows full replacement of capabilities map
+		for k, v := range capabilities {
+			if v == nil {
+				delete(existing.Capabilities, domain.CapabilityType(k))
+			} else {
+				if cap, ok := v.(*domain.Capability); ok {
+					existing.Capabilities[domain.CapabilityType(k)] = cap
+				}
+			}
+		}
+	}
+	if lastSeen, ok := updates["last_seen"].(time.Time); ok {
+		existing.LastSeen = &lastSeen
 	}
 
 	return r.UpsertNode(ctx, existing)
@@ -441,42 +388,25 @@ func (r *Repository) DeleteNode(ctx context.Context, id string) error {
 
 // GetEdge retrieves a single edge by ID
 func (r *Repository) GetEdge(ctx context.Context, id string) (*domain.Edge, error) {
-	var (
-		fromID, toID, edgeType string
-		propertiesJSON         sql.NullString
-	)
+	var row edgeRow
 
-	err := r.db.QueryRowContext(ctx, `
-		SELECT from_id, to_id, type, properties
-		FROM edges WHERE id = ?
-	`, id).Scan(&fromID, &toID, &edgeType, &propertiesJSON)
+	err := r.db.QueryRowContext(ctx,
+		`SELECT `+edgeColumns+` FROM edges WHERE id = ?`, id,
+	).Scan(row.scanArgs()...)
 
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
 	if err != nil {
-		return nil, fmt.Errorf("failed to query edge: %w", err)
+		return nil, fmt.Errorf("query edge: %w", err)
 	}
 
-	edge := &domain.Edge{
-		ID:     id,
-		FromID: fromID,
-		ToID:   toID,
-		Type:   domain.EdgeType(edgeType),
-	}
-
-	if propertiesJSON.Valid && propertiesJSON.String != "" {
-		if err := json.Unmarshal([]byte(propertiesJSON.String), &edge.Properties); err != nil {
-			return nil, fmt.Errorf("failed to unmarshal properties: %w", err)
-		}
-	}
-
-	return edge, nil
+	return row.toDomain()
 }
 
 // ListEdges returns all edges, optionally filtered
 func (r *Repository) ListEdges(ctx context.Context, edgeType, fromID, toID string) ([]domain.Edge, error) {
-	query := "SELECT id, from_id, to_id, type, properties FROM edges WHERE 1=1"
+	query := "SELECT " + edgeColumns + " FROM edges WHERE 1=1"
 	args := make([]interface{}, 0)
 
 	if edgeType != "" {
@@ -494,37 +424,27 @@ func (r *Repository) ListEdges(ctx context.Context, edgeType, fromID, toID strin
 
 	rows, err := r.db.QueryContext(ctx, query, args...)
 	if err != nil {
-		return nil, fmt.Errorf("failed to query edges: %w", err)
+		return nil, fmt.Errorf("query edges: %w", err)
 	}
 	defer rows.Close()
 
+	return scanEdgeRows(rows)
+}
+
+// scanEdgeRows scans multiple edge rows into a slice
+func scanEdgeRows(rows *sql.Rows) ([]domain.Edge, error) {
 	edges := make([]domain.Edge, 0)
 	for rows.Next() {
-		var (
-			id, fromID, toID, edgeType string
-			propertiesJSON             sql.NullString
-		)
-
-		if err := rows.Scan(&id, &fromID, &toID, &edgeType, &propertiesJSON); err != nil {
-			return nil, fmt.Errorf("failed to scan edge: %w", err)
+		var row edgeRow
+		if err := rows.Scan(row.scanArgs()...); err != nil {
+			return nil, fmt.Errorf("scan edge: %w", err)
 		}
-
-		edge := domain.Edge{
-			ID:     id,
-			FromID: fromID,
-			ToID:   toID,
-			Type:   domain.EdgeType(edgeType),
+		edge, err := row.toDomain()
+		if err != nil {
+			return nil, err
 		}
-
-		if propertiesJSON.Valid && propertiesJSON.String != "" {
-			if err := json.Unmarshal([]byte(propertiesJSON.String), &edge.Properties); err != nil {
-				return nil, fmt.Errorf("failed to unmarshal properties: %w", err)
-			}
-		}
-
-		edges = append(edges, edge)
+		edges = append(edges, *edge)
 	}
-
 	return edges, rows.Err()
 }
 
@@ -557,16 +477,12 @@ func (r *Repository) CreateEdge(ctx context.Context, edge *domain.Edge) error {
 
 // UpsertEdge inserts or updates an edge
 func (r *Repository) UpsertEdge(ctx context.Context, edge *domain.Edge) error {
-	var propertiesJSON sql.NullString
-	if edge.Properties != nil && len(edge.Properties) > 0 {
-		data, err := json.Marshal(edge.Properties)
-		if err != nil {
-			return fmt.Errorf("failed to marshal properties: %w", err)
-		}
-		propertiesJSON = sql.NullString{String: string(data), Valid: true}
+	args, err := edgeInsertArgs(edge)
+	if err != nil {
+		return fmt.Errorf("prepare edge args: %w", err)
 	}
 
-	_, err := r.db.ExecContext(ctx, `
+	_, err = r.db.ExecContext(ctx, `
 		INSERT INTO edges (id, from_id, to_id, type, properties)
 		VALUES (?, ?, ?, ?, ?)
 		ON CONFLICT(id) DO UPDATE SET
@@ -574,10 +490,10 @@ func (r *Repository) UpsertEdge(ctx context.Context, edge *domain.Edge) error {
 			to_id = excluded.to_id,
 			type = excluded.type,
 			properties = excluded.properties
-	`, edge.ID, edge.FromID, edge.ToID, edge.Type, propertiesJSON)
+	`, args...)
 
 	if err != nil {
-		return fmt.Errorf("failed to upsert edge: %w", err)
+		return fmt.Errorf("upsert edge: %w", err)
 	}
 
 	return nil
@@ -901,81 +817,19 @@ func (r *Repository) Close() error {
 // GetNodesForVerification returns nodes that need verification
 // This includes unverified nodes and nodes that haven't been verified recently
 func (r *Repository) GetNodesForVerification(ctx context.Context) ([]domain.Node, error) {
-	// Get nodes that are unverified, or haven't been verified in the last 5 minutes
-	query := `
-		SELECT id, type, label, properties, source, status, last_verified, last_seen, discovered,
-		       truth, truth_status, has_discrepancy, created_at, updated_at
-		FROM nodes
+	query := `SELECT ` + nodeColumns + ` FROM nodes
 		WHERE status = 'unverified'
 		   OR status = 'verifying'
 		   OR last_verified IS NULL
-		   OR last_verified < datetime('now', '-5 minutes')
-	`
+		   OR last_verified < datetime('now', '-5 minutes')`
 
 	rows, err := r.db.QueryContext(ctx, query)
 	if err != nil {
-		return nil, fmt.Errorf("failed to query nodes for verification: %w", err)
+		return nil, fmt.Errorf("query nodes for verification: %w", err)
 	}
 	defer rows.Close()
 
-	nodes := make([]domain.Node, 0)
-	for rows.Next() {
-		var (
-			id, nodeType, label       string
-			src, status               sql.NullString
-			propertiesJSON            sql.NullString
-			discoveredJSON            sql.NullString
-			truthJSON                 sql.NullString
-			truthStatus               sql.NullString
-			hasDiscrepancy            sql.NullInt64
-			lastVerified, lastSeen    sql.NullTime
-			createdAt, updatedAt      time.Time
-		)
-
-		if err := rows.Scan(&id, &nodeType, &label, &propertiesJSON, &src, &status, &lastVerified, &lastSeen, &discoveredJSON, &truthJSON, &truthStatus, &hasDiscrepancy, &createdAt, &updatedAt); err != nil {
-			return nil, fmt.Errorf("failed to scan node: %w", err)
-		}
-
-		node := domain.Node{
-			ID:             id,
-			Type:           domain.NodeType(nodeType),
-			Label:          label,
-			Source:         src.String,
-			Status:         domain.NodeStatus(status.String),
-			TruthStatus:    domain.TruthStatus(truthStatus.String),
-			HasDiscrepancy: hasDiscrepancy.Valid && hasDiscrepancy.Int64 == 1,
-			CreatedAt:      createdAt,
-			UpdatedAt:      updatedAt,
-		}
-
-		if node.Status == "" {
-			node.Status = domain.NodeStatusUnverified
-		}
-
-		if lastVerified.Valid {
-			node.LastVerified = &lastVerified.Time
-		}
-		if lastSeen.Valid {
-			node.LastSeen = &lastSeen.Time
-		}
-
-		if propertiesJSON.Valid && propertiesJSON.String != "" {
-			json.Unmarshal([]byte(propertiesJSON.String), &node.Properties)
-		}
-
-		if discoveredJSON.Valid && discoveredJSON.String != "" {
-			json.Unmarshal([]byte(discoveredJSON.String), &node.Discovered)
-		}
-
-		if truthJSON.Valid && truthJSON.String != "" {
-			node.Truth = &domain.NodeTruth{}
-			json.Unmarshal([]byte(truthJSON.String), node.Truth)
-		}
-
-		nodes = append(nodes, node)
-	}
-
-	return nodes, rows.Err()
+	return scanNodeRows(rows)
 }
 
 // UpdateNodeVerification updates only the verification-related fields of a node
@@ -1136,20 +990,16 @@ func (r *Repository) ClearNodeTruth(ctx context.Context, nodeID string) error {
 
 // GetNodesWithTruth returns all nodes that have operator truth set
 func (r *Repository) GetNodesWithTruth(ctx context.Context) ([]domain.Node, error) {
-	query := `
-		SELECT id, type, label, properties, source, status, last_verified, last_seen, discovered,
-		       truth, truth_status, has_discrepancy, created_at, updated_at
-		FROM nodes
-		WHERE truth_status = 'asserted' OR truth_status = 'conflict'
-	`
+	query := `SELECT ` + nodeColumns + ` FROM nodes
+		WHERE truth_status = 'asserted' OR truth_status = 'conflict'`
 
 	rows, err := r.db.QueryContext(ctx, query)
 	if err != nil {
-		return nil, fmt.Errorf("failed to query nodes with truth: %w", err)
+		return nil, fmt.Errorf("query nodes with truth: %w", err)
 	}
 	defer rows.Close()
 
-	return r.scanNodes(rows)
+	return scanNodeRows(rows)
 }
 
 // UpdateNodeDiscrepancyStatus updates the has_discrepancy flag and truth_status
@@ -1299,68 +1149,6 @@ func (r *Repository) ResolveDiscrepancy(ctx context.Context, id string, resoluti
 	return r.UpdateNodeDiscrepancyStatus(ctx, d.NodeID, count > 0)
 }
 
-// scanNodes is a helper to scan rows into Node slice
-func (r *Repository) scanNodes(rows *sql.Rows) ([]domain.Node, error) {
-	nodes := make([]domain.Node, 0)
-	for rows.Next() {
-		var (
-			id, nodeType, label    string
-			src, status            sql.NullString
-			propertiesJSON         sql.NullString
-			discoveredJSON         sql.NullString
-			truthJSON              sql.NullString
-			truthStatus            sql.NullString
-			hasDiscrepancy         sql.NullInt64
-			lastVerified, lastSeen sql.NullTime
-			createdAt, updatedAt   time.Time
-		)
-
-		if err := rows.Scan(&id, &nodeType, &label, &propertiesJSON, &src, &status, &lastVerified, &lastSeen, &discoveredJSON, &truthJSON, &truthStatus, &hasDiscrepancy, &createdAt, &updatedAt); err != nil {
-			return nil, fmt.Errorf("failed to scan node: %w", err)
-		}
-
-		node := domain.Node{
-			ID:             id,
-			Type:           domain.NodeType(nodeType),
-			Label:          label,
-			Source:         src.String,
-			Status:         domain.NodeStatus(status.String),
-			TruthStatus:    domain.TruthStatus(truthStatus.String),
-			HasDiscrepancy: hasDiscrepancy.Valid && hasDiscrepancy.Int64 == 1,
-			CreatedAt:      createdAt,
-			UpdatedAt:      updatedAt,
-		}
-
-		if node.Status == "" {
-			node.Status = domain.NodeStatusUnverified
-		}
-
-		if lastVerified.Valid {
-			node.LastVerified = &lastVerified.Time
-		}
-		if lastSeen.Valid {
-			node.LastSeen = &lastSeen.Time
-		}
-
-		if propertiesJSON.Valid && propertiesJSON.String != "" {
-			json.Unmarshal([]byte(propertiesJSON.String), &node.Properties)
-		}
-
-		if discoveredJSON.Valid && discoveredJSON.String != "" {
-			json.Unmarshal([]byte(discoveredJSON.String), &node.Discovered)
-		}
-
-		if truthJSON.Valid && truthJSON.String != "" {
-			node.Truth = &domain.NodeTruth{}
-			json.Unmarshal([]byte(truthJSON.String), node.Truth)
-		}
-
-		nodes = append(nodes, node)
-	}
-
-	return nodes, rows.Err()
-}
-
 // scanDiscrepancies is a helper to scan rows into Discrepancy slice
 func (r *Repository) scanDiscrepancies(rows *sql.Rows) ([]domain.Discrepancy, error) {
 	discrepancies := make([]domain.Discrepancy, 0)
@@ -1401,4 +1189,258 @@ func (r *Repository) scanDiscrepancies(rows *sql.Rows) ([]domain.Discrepancy, er
 	}
 
 	return discrepancies, rows.Err()
+}
+
+// ==================== Secrets Repository Methods ====================
+
+// CreateSecret creates a new operator secret
+func (r *Repository) CreateSecret(ctx context.Context, secret *domain.Secret) error {
+	dataJSON, err := json.Marshal(secret.Data)
+	if err != nil {
+		return fmt.Errorf("failed to marshal secret data: %w", err)
+	}
+
+	metadataJSON, err := json.Marshal(secret.Metadata)
+	if err != nil {
+		return fmt.Errorf("failed to marshal secret metadata: %w", err)
+	}
+
+	now := time.Now()
+	secret.CreatedAt = now
+	secret.UpdatedAt = now
+
+	query := `
+		INSERT INTO secrets (id, name, type, source, description, data, metadata, immutable, status, status_message, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`
+	_, err = r.db.ExecContext(ctx, query,
+		secret.ID,
+		secret.Name,
+		string(secret.Type),
+		string(secret.Source),
+		secret.Description,
+		string(dataJSON),
+		string(metadataJSON),
+		boolToInt(secret.Immutable),
+		string(secret.Status),
+		secret.StatusMessage,
+		secret.CreatedAt,
+		secret.UpdatedAt,
+	)
+	if err != nil {
+		return fmt.Errorf("failed to create secret: %w", err)
+	}
+
+	return nil
+}
+
+// GetSecret retrieves a secret by ID
+func (r *Repository) GetSecret(ctx context.Context, id string) (*domain.Secret, error) {
+	query := `
+		SELECT id, name, type, source, description, data, metadata, immutable, status, status_message, usage_count, last_used_at, created_at, updated_at
+		FROM secrets WHERE id = ?
+	`
+	row := r.db.QueryRowContext(ctx, query, id)
+
+	var secret domain.Secret
+	var dataJSON, metadataJSON sql.NullString
+	var immutable int
+	var lastUsedAt sql.NullTime
+
+	err := row.Scan(
+		&secret.ID,
+		&secret.Name,
+		&secret.Type,
+		&secret.Source,
+		&secret.Description,
+		&dataJSON,
+		&metadataJSON,
+		&immutable,
+		&secret.Status,
+		&secret.StatusMessage,
+		&secret.UsageCount,
+		&lastUsedAt,
+		&secret.CreatedAt,
+		&secret.UpdatedAt,
+	)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("failed to get secret: %w", err)
+	}
+
+	secret.Immutable = immutable != 0
+	if lastUsedAt.Valid {
+		secret.LastUsedAt = &lastUsedAt.Time
+	}
+
+	if dataJSON.Valid {
+		secret.Data = make(map[string]string)
+		json.Unmarshal([]byte(dataJSON.String), &secret.Data)
+	}
+	if metadataJSON.Valid {
+		secret.Metadata = make(map[string]string)
+		json.Unmarshal([]byte(metadataJSON.String), &secret.Metadata)
+	}
+
+	return &secret, nil
+}
+
+// UpdateSecret updates an existing secret
+func (r *Repository) UpdateSecret(ctx context.Context, secret *domain.Secret) error {
+	dataJSON, err := json.Marshal(secret.Data)
+	if err != nil {
+		return fmt.Errorf("failed to marshal secret data: %w", err)
+	}
+
+	metadataJSON, err := json.Marshal(secret.Metadata)
+	if err != nil {
+		return fmt.Errorf("failed to marshal secret metadata: %w", err)
+	}
+
+	secret.UpdatedAt = time.Now()
+
+	query := `
+		UPDATE secrets SET
+			name = ?, type = ?, description = ?, data = ?, metadata = ?,
+			status = ?, status_message = ?, updated_at = ?
+		WHERE id = ? AND immutable = 0
+	`
+	result, err := r.db.ExecContext(ctx, query,
+		secret.Name,
+		string(secret.Type),
+		secret.Description,
+		string(dataJSON),
+		string(metadataJSON),
+		string(secret.Status),
+		secret.StatusMessage,
+		secret.UpdatedAt,
+		secret.ID,
+	)
+	if err != nil {
+		return fmt.Errorf("failed to update secret: %w", err)
+	}
+
+	rowsAffected, _ := result.RowsAffected()
+	if rowsAffected == 0 {
+		return fmt.Errorf("secret not found or is immutable")
+	}
+
+	return nil
+}
+
+// DeleteSecret deletes a secret by ID (only operator secrets)
+func (r *Repository) DeleteSecret(ctx context.Context, id string) error {
+	query := `DELETE FROM secrets WHERE id = ? AND immutable = 0`
+	result, err := r.db.ExecContext(ctx, query, id)
+	if err != nil {
+		return fmt.Errorf("failed to delete secret: %w", err)
+	}
+
+	rowsAffected, _ := result.RowsAffected()
+	if rowsAffected == 0 {
+		return fmt.Errorf("secret not found or is immutable")
+	}
+
+	return nil
+}
+
+// ListSecrets lists all secrets, optionally filtered by type or source
+func (r *Repository) ListSecrets(ctx context.Context, secretType string, source string) ([]domain.Secret, error) {
+	query := `
+		SELECT id, name, type, source, description, data, metadata, immutable, status, status_message, usage_count, last_used_at, created_at, updated_at
+		FROM secrets WHERE 1=1
+	`
+	args := []interface{}{}
+
+	if secretType != "" {
+		query += " AND type = ?"
+		args = append(args, secretType)
+	}
+	if source != "" {
+		query += " AND source = ?"
+		args = append(args, source)
+	}
+
+	query += " ORDER BY name ASC"
+
+	rows, err := r.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list secrets: %w", err)
+	}
+	defer rows.Close()
+
+	var secrets []domain.Secret
+	for rows.Next() {
+		var secret domain.Secret
+		var dataJSON, metadataJSON sql.NullString
+		var immutable int
+		var lastUsedAt sql.NullTime
+
+		err := rows.Scan(
+			&secret.ID,
+			&secret.Name,
+			&secret.Type,
+			&secret.Source,
+			&secret.Description,
+			&dataJSON,
+			&metadataJSON,
+			&immutable,
+			&secret.Status,
+			&secret.StatusMessage,
+			&secret.UsageCount,
+			&lastUsedAt,
+			&secret.CreatedAt,
+			&secret.UpdatedAt,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("failed to scan secret: %w", err)
+		}
+
+		secret.Immutable = immutable != 0
+		if lastUsedAt.Valid {
+			secret.LastUsedAt = &lastUsedAt.Time
+		}
+
+		if dataJSON.Valid {
+			secret.Data = make(map[string]string)
+			json.Unmarshal([]byte(dataJSON.String), &secret.Data)
+		}
+		if metadataJSON.Valid {
+			secret.Metadata = make(map[string]string)
+			json.Unmarshal([]byte(metadataJSON.String), &secret.Metadata)
+		}
+
+		secrets = append(secrets, secret)
+	}
+
+	return secrets, rows.Err()
+}
+
+// UpdateSecretUsage updates the usage tracking for a secret
+func (r *Repository) UpdateSecretUsage(ctx context.Context, id string) error {
+	query := `
+		UPDATE secrets SET
+			usage_count = usage_count + 1,
+			last_used_at = ?
+		WHERE id = ?
+	`
+	_, err := r.db.ExecContext(ctx, query, time.Now(), id)
+	return err
+}
+
+// UpdateSecretStatus updates the status of a secret
+func (r *Repository) UpdateSecretStatus(ctx context.Context, id string, status domain.SecretStatus, message string) error {
+	query := `UPDATE secrets SET status = ?, status_message = ?, updated_at = ? WHERE id = ?`
+	_, err := r.db.ExecContext(ctx, query, string(status), message, time.Now(), id)
+	return err
+}
+
+// boolToInt converts bool to int for SQLite
+func boolToInt(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
 }

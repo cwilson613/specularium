@@ -188,9 +188,18 @@ kubectl apply -f ../k8s/manifests/specularium/ --kubeconfig ~/.kube/config-brutu
 kubectl rollout restart deployment/specularium -n default --kubeconfig ~/.kube/config-brutus
 ```
 
+## SQLite
+
+Specularium uses `modernc.org/sqlite`, a pure-Go SQLite implementation:
+- No CGO required, single static binary
+- Cross-compiles to ARM64, ARMv7, etc. (`make build-all`)
+- DSN uses `_pragma=name(value)` syntax for pragmas
+- Driver name is `"sqlite"` (not `"sqlite3"`)
+
+Build with `CGO_ENABLED=0` for all targets.
+
 ## Notes
 
-- CGO required for SQLite; Docker uses Alpine with musl-dev
 - Frontend uses vis-network from CDN with circularImage nodes
 - 40K Mechanicus theming throughout UI ("Heresy Detected" for discrepancies)
 - Position data persists in SQLite via PVC
