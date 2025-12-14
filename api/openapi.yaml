@@ -751,6 +751,28 @@ components:
           type: string
           description: Data source that created this node (ansible, scan, manual, etc.)
           example: "ansible"
+        capabilities:
+          type: object
+          additionalProperties:
+            $ref: '#/components/schemas/Capability'
+          description: |
+            Detected capabilities for this node (Kubernetes, Docker, SSH, etc.).
+            Each capability has aggregate confidence from supporting evidence.
+          example:
+            kubernetes:
+              type: "kubernetes"
+              confidence: 0.95
+              status: "confirmed"
+              properties:
+                role: "worker"
+                version: "v1.28.0"
+              evidence:
+                - id: "ev-1"
+                  source: "k8s_api"
+                  property: "is_k8s_node"
+                  value: true
+                  confidence: 0.95
+                  observed_at: "2025-12-09T10:30:00Z"
         created_at:
           type: string
           format: date-time
@@ -897,6 +919,134 @@ components:
           enum: [merge, replace]
           description: Import strategy used
           example: "merge"
+
+    Evidence:
+      type: object
+      description: |
+        A single piece of discovered information supporting a capability.
+        Evidence has a source (how it was gathered) and confidence level.
+      required:
+        - id
+        - source
+        - property
+        - confidence
+        - observed_at
+      properties:
+        id:
+          type: string
+          description: Unique identifier for this evidence
+          example: "ev-k8s-api-1"
+        source:
+          type: string
+          description: How this evidence was gathered
+          enum:
+            - port_scan
+            - banner
+            - ssh_probe
+            - k8s_api
+            - docker_api
+            - process_list
+            - filesystem
+            - dns
+            - correlation
+            - operator
+          example: "k8s_api"
+        property:
+          type: string
+          description: What was discovered (e.g., "is_k8s_node", "k8s_role")
+          example: "is_k8s_node"
+        value:
+          description: The discovered value (can be any type)
+          example: true
+        confidence:
+          type: number
+          format: float
+          minimum: 0.0
+          maximum: 1.0
+          description: Confidence level (0.0 - 1.0)
+          example: 0.95
+        observed_at:
+          type: string
+          format: date-time
+          description: When this evidence was observed
+          example: "2025-12-09T10:30:00Z"
+        expires_at:
+          type: string
+          format: date-time
+          description: When this evidence should be re-validated (optional)
+          example: "2025-12-10T10:30:00Z"
+        secret_ref:
+          type: string
+          description: Reference to secret that enabled discovery (optional)
+          example: "ssh-key-brutus"
+        raw:
+          type: object
+          additionalProperties: true
+          description: Raw data from probe for debugging (optional)
+
+    Capability:
+      type: object
+      description: |
+        A detected capability with supporting evidence.
+        Capabilities include Kubernetes, Docker, SSH, HTTP, DNS, etc.
+        Aggregate confidence is calculated from all evidence pieces.
+      required:
+        - type
+        - confidence
+        - status
+      properties:
+        type:
+          type: string
+          description: Capability type
+          enum:
+            - kubernetes
+            - docker
+            - ssh
+            - http
+            - dns
+            - dhcp
+            - smb
+            - nfs
+          example: "kubernetes"
+        confidence:
+          type: number
+          format: float
+          minimum: 0.0
+          maximum: 1.0
+          description: |
+            Aggregate confidence from all evidence (0.0 - 1.0).
+            Calculated using max confidence + diminishing bonus for corroboration.
+          example: 0.95
+        status:
+          type: string
+          description: |
+            Human-readable status based on confidence:
+            - confirmed (>= 0.7)
+            - probable (0.4 - 0.69)
+            - speculative (< 0.4)
+          enum:
+            - confirmed
+            - probable
+            - speculative
+          example: "confirmed"
+        properties:
+          type: object
+          additionalProperties: true
+          description: Capability-specific properties (K8s role, Docker version, etc.)
+          example:
+            role: "worker"
+            version: "v1.28.0"
+            distribution: "k3s"
+        evidence:
+          type: array
+          description: Array of supporting evidence
+          items:
+            $ref: '#/components/schemas/Evidence'
+        last_probed:
+          type: string
+          format: date-time
+          description: When this capability was last probed (optional)
+          example: "2025-12-09T10:30:00Z"
 
     Error:
       type: object

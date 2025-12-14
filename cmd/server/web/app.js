@@ -89,6 +89,12 @@
             color: theme.teal,
             size: 26
         },
+        interface: {
+            icon: '/icons/interface.svg',
+            color: theme.purple,
+            size: 18,
+            satellite: true  // Indicates this node orbits its parent
+        },
         unknown: {
             icon: '/icons/unknown.svg',
             color: theme.greenDim,
@@ -149,9 +155,13 @@
         scanBtn: document.getElementById('scan-btn'),
         scanModal: document.getElementById('scan-modal'),
         scanModalClose: document.getElementById('scan-modal-close'),
+        scanTargetSelect: document.getElementById('scan-target-select'),
         scanCidr: document.getElementById('scan-cidr'),
+        scanHint: document.getElementById('scan-hint'),
         scanCancel: document.getElementById('scan-cancel'),
         scanSubmit: document.getElementById('scan-submit'),
+        discoveryModeSection: document.getElementById('discovery-mode-section'),
+        discoveryModeCheckbox: document.getElementById('discovery-mode-checkbox'),
         zoomIn: document.getElementById('zoom-in'),
         zoomOut: document.getElementById('zoom-out'),
         zoomFit: document.getElementById('zoom-fit'),
@@ -176,7 +186,40 @@
         nodeDetailClose: document.getElementById('node-detail-close'),
         truthProperties: document.getElementById('truth-properties'),
         setTruthBtn: document.getElementById('set-truth-btn'),
-        clearTruthBtn: document.getElementById('clear-truth-btn')
+        clearTruthBtn: document.getElementById('clear-truth-btn'),
+        // Selection toolbar
+        selectionToolbar: document.getElementById('selection-toolbar'),
+        selectionCountValue: document.getElementById('selection-count-value'),
+        mergeSelectedBtn: document.getElementById('merge-selected-btn'),
+        clearSelectionBtn: document.getElementById('clear-selection-btn'),
+        // Merge modal
+        mergeModal: document.getElementById('merge-modal'),
+        mergeModalClose: document.getElementById('merge-modal-close'),
+        mergeSelectedCount: document.getElementById('merge-selected-count'),
+        mergeParentName: document.getElementById('merge-parent-name'),
+        mergeParentType: document.getElementById('merge-parent-type'),
+        mergePreview: document.getElementById('merge-preview'),
+        mergeCancel: document.getElementById('merge-cancel'),
+        mergeSubmit: document.getElementById('merge-submit'),
+        // Secrets management
+        secretsBtn: document.getElementById('secrets-btn'),
+        secretsModal: document.getElementById('secrets-modal'),
+        secretsModalClose: document.getElementById('secrets-modal-close'),
+        secretsList: document.getElementById('secrets-list'),
+        secretsTypeFilter: document.getElementById('secrets-type-filter'),
+        secretsSourceFilter: document.getElementById('secrets-source-filter'),
+        secretsAddBtn: document.getElementById('secrets-add-btn'),
+        // Secret edit modal
+        secretEditModal: document.getElementById('secret-edit-modal'),
+        secretEditTitle: document.getElementById('secret-edit-title'),
+        secretEditClose: document.getElementById('secret-edit-close'),
+        secretEditId: document.getElementById('secret-edit-id'),
+        secretEditName: document.getElementById('secret-edit-name'),
+        secretEditType: document.getElementById('secret-edit-type'),
+        secretEditDescription: document.getElementById('secret-edit-description'),
+        secretEditDataFields: document.getElementById('secret-edit-data-fields'),
+        secretEditCancel: document.getElementById('secret-edit-cancel'),
+        secretEditSubmit: document.getElementById('secret-edit-submit')
     };
 
     // Discovery log state
@@ -185,9 +228,28 @@
     // Discrepancies state
     let discrepancies = [];
 
-    // Current selected node
+    // Scan targets state (loaded from /api/environment)
+    let scanTargetsData = null;
+
+    // Segmentum (subnet nebula) state - maps CIDR to color
+    const segmentumColors = {};
+    const segmentumPalette = [
+        { base: 'rgba(57, 255, 20, 0.12)', glow: 'rgba(57, 255, 20, 0.25)' },    // Green (primary)
+        { base: 'rgba(116, 192, 252, 0.10)', glow: 'rgba(116, 192, 252, 0.22)' }, // Blue
+        { base: 'rgba(255, 169, 77, 0.10)', glow: 'rgba(255, 169, 77, 0.22)' },   // Orange
+        { base: 'rgba(105, 219, 124, 0.10)', glow: 'rgba(105, 219, 124, 0.22)' }, // Teal
+        { base: 'rgba(255, 107, 107, 0.10)', glow: 'rgba(255, 107, 107, 0.22)' }, // Red
+        { base: 'rgba(186, 135, 252, 0.10)', glow: 'rgba(186, 135, 252, 0.22)' }, // Purple
+    ];
+    let segmentumColorIndex = 0;
+
+    // Current selected node (for detail modal)
     let currentNodeId = null;
     let currentNodeData = null;
+
+    // Multi-select state
+    let selectedNodes = new Set();
+    let isMultiSelectMode = false;
 
     // Initialize
     async function init() {
@@ -240,10 +302,66 @@
         elements.setTruthBtn.addEventListener('click', handleSetTruth);
         elements.clearTruthBtn.addEventListener('click', handleClearTruth);
 
+        // Selection toolbar handlers
+        elements.mergeSelectedBtn.addEventListener('click', openMergeModal);
+        elements.clearSelectionBtn.addEventListener('click', clearSelection);
+
+        // Merge modal handlers
+        elements.mergeModalClose.addEventListener('click', closeMergeModal);
+        elements.mergeCancel.addEventListener('click', closeMergeModal);
+        elements.mergeSubmit.addEventListener('click', handleMerge);
+        elements.mergeModal.addEventListener('click', (e) => {
+            if (e.target === elements.mergeModal) closeMergeModal();
+        });
+        elements.mergeParentName.addEventListener('input', updateMergePreview);
+
+        // Secrets management handlers
+        if (elements.secretsBtn) {
+            elements.secretsBtn.addEventListener('click', openSecretsModal);
+        }
+        if (elements.secretsModal) {
+            elements.secretsModalClose.addEventListener('click', closeSecretsModal);
+            elements.secretsModal.addEventListener('click', (e) => {
+                if (e.target === elements.secretsModal) closeSecretsModal();
+            });
+            elements.secretsTypeFilter.addEventListener('change', loadSecrets);
+            elements.secretsSourceFilter.addEventListener('change', loadSecrets);
+            elements.secretsAddBtn.addEventListener('click', openSecretEditModal);
+        }
+        if (elements.secretEditModal) {
+            elements.secretEditClose.addEventListener('click', closeSecretEditModal);
+            elements.secretEditCancel.addEventListener('click', closeSecretEditModal);
+            elements.secretEditSubmit.addEventListener('click', handleSecretSave);
+            elements.secretEditModal.addEventListener('click', (e) => {
+                if (e.target === elements.secretEditModal) closeSecretEditModal();
+            });
+            elements.secretEditType.addEventListener('change', updateSecretDataFields);
+        }
+
         await preloadIcons();
+        await registerClient();  // Register this browser as a client node
         await loadGraph();
         await loadDiscrepancies();
         connectSSE();
+    }
+
+    // Register this browser client as a node in the graph
+    async function registerClient() {
+        try {
+            const response = await fetch('/api/client', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    user_agent: navigator.userAgent
+                })
+            });
+            if (response.ok) {
+                const data = await response.json();
+                console.log('Client registered:', data);
+            }
+        } catch (error) {
+            console.error('Failed to register client:', error);
+        }
     }
 
     // Toggle actions dropdown
@@ -376,12 +494,130 @@
         elements.pasteTextarea.value = '';
     }
 
-    // Open scan modal
-    function openScanModal() {
+    // Open scan modal - loads suggested targets from environment
+    async function openScanModal() {
         closeDropdown();
         elements.scanModal.classList.add('active');
+
+        // Reset discovery mode checkbox
+        elements.discoveryModeCheckbox.checked = false;
+
+        // Load environment to get suggested scan targets
+        try {
+            const response = await fetch('/api/environment');
+            if (response.ok) {
+                scanTargetsData = await response.json();
+                populateScanTargets(false);
+            } else {
+                // Fallback to manual entry
+                showManualScanInput();
+            }
+        } catch (error) {
+            console.error('Failed to load environment:', error);
+            showManualScanInput();
+        }
+
+        // Setup discovery mode checkbox handler
+        elements.discoveryModeCheckbox.onchange = () => {
+            populateScanTargets(elements.discoveryModeCheckbox.checked);
+        };
+    }
+
+    // Populate scan target dropdown with detected subnets
+    // includeDiscovery: boolean - whether to include RFC1918 discovery targets
+    function populateScanTargets(includeDiscovery) {
+        if (!scanTargetsData) {
+            showManualScanInput();
+            return;
+        }
+
+        const select = elements.scanTargetSelect;
+        select.innerHTML = '';
+
+        const scanTargets = scanTargetsData.scan_targets || {};
+        const primaryTargets = scanTargets.primary || [];
+        const discoveryTargets = scanTargets.discovery || [];
+
+        // Check if we have any primary targets
+        const hasPrimary = primaryTargets.length > 0;
+        const hasDiscovery = discoveryTargets.length > 0;
+
+        // Show discovery mode section if there are discovery targets available
+        if (hasDiscovery) {
+            elements.discoveryModeSection.style.display = 'block';
+        } else {
+            elements.discoveryModeSection.style.display = 'none';
+        }
+
+        // Add primary (configured/detected) targets
+        if (hasPrimary) {
+            const primaryGroup = document.createElement('optgroup');
+            primaryGroup.label = 'CONFIGURED / DETECTED';
+            primaryTargets.forEach((target) => {
+                const opt = document.createElement('option');
+                opt.value = target;
+                opt.textContent = target;
+                primaryGroup.appendChild(opt);
+            });
+            select.appendChild(primaryGroup);
+        }
+
+        // Add discovery targets if enabled
+        if (includeDiscovery && hasDiscovery) {
+            const discoveryGroup = document.createElement('optgroup');
+            discoveryGroup.label = 'DISCOVERY (RFC1918)';
+            discoveryTargets.forEach((target) => {
+                const opt = document.createElement('option');
+                opt.value = target;
+                opt.textContent = target;
+                opt.className = 'discovery-target';
+                discoveryGroup.appendChild(opt);
+            });
+            select.appendChild(discoveryGroup);
+        }
+
+        // Add custom option
+        const customOpt = document.createElement('option');
+        customOpt.value = '__custom__';
+        customOpt.textContent = 'Custom CIDR...';
+        select.appendChild(customOpt);
+
+        // If no targets at all, show manual input
+        if (!hasPrimary && (!includeDiscovery || !hasDiscovery)) {
+            showManualScanInput();
+            return;
+        }
+
+        // Show dropdown, hide manual input
+        select.style.display = 'block';
+        elements.scanCidr.style.display = 'none';
+
+        if (hasPrimary) {
+            elements.scanHint.textContent = 'Select a configured subnet or enable Discovery Mode for broader scanning.';
+        } else {
+            elements.scanHint.textContent = 'No subnets configured. Enable Discovery Mode or enter a custom CIDR.';
+        }
+
+        // Handle custom selection
+        select.onchange = () => {
+            if (select.value === '__custom__') {
+                showManualScanInput();
+            }
+        };
+    }
+
+    // Show manual CIDR input
+    function showManualScanInput() {
+        elements.scanTargetSelect.style.display = 'none';
+        elements.scanCidr.style.display = 'block';
+        elements.scanCidr.value = '192.168.0.0/24';
         elements.scanCidr.focus();
         elements.scanCidr.select();
+        elements.scanHint.textContent = 'Enter a CIDR notation subnet to scan (e.g., 192.168.0.0/24)';
+        // Still show discovery section if we have discovery targets
+        if (scanTargetsData?.scan_targets?.discovery?.length > 0) {
+            elements.discoveryModeSection.style.display = 'block';
+        }
     }
 
     // Close scan modal
@@ -391,9 +627,18 @@
 
     // Handle network scan
     async function handleScan() {
-        const cidr = elements.scanCidr.value.trim();
+        // Get CIDR from either dropdown or manual input
+        let cidr;
+        if (elements.scanTargetSelect.style.display !== 'none' &&
+            elements.scanTargetSelect.value &&
+            elements.scanTargetSelect.value !== '__custom__') {
+            cidr = elements.scanTargetSelect.value;
+        } else {
+            cidr = elements.scanCidr.value.trim();
+        }
+
         if (!cidr) {
-            updateStatus('ERROR: NO CIDR PROVIDED');
+            updateStatus('ERROR: NO SUBNET SELECTED');
             return;
         }
 
@@ -595,10 +840,24 @@
         elements.nodeCount.textContent = String(nodeCount).padStart(2, '0');
         elements.edgeCount.textContent = String(edgeCount).padStart(2, '0');
 
+        // Build parent-child lookup for satellite positioning
+        const childrenByParent = {};
+        const nodeById = {};
+        (graph.nodes || []).forEach(n => {
+            nodeById[n.id] = n;
+            if (n.parent_id) {
+                if (!childrenByParent[n.parent_id]) {
+                    childrenByParent[n.parent_id] = [];
+                }
+                childrenByParent[n.parent_id].push(n.id);
+            }
+        });
+
         // Transform nodes to vis-network format with icons
         const nodes = await Promise.all((graph.nodes || []).map(async n => {
             const typeConfig = nodeTypes[n.type] || nodeTypes.unknown;
             const position = graph.positions && graph.positions[n.id];
+            const isSatellite = typeConfig.satellite && n.parent_id;
 
             // Determine border color based on verification status and truth status
             const status = n.status || 'unverified';
@@ -628,6 +887,9 @@
                 label = '\u26A0 ' + label;  // Warning for conflict
             }
 
+            // Satellite nodes get smaller labels
+            const fontSize = isSatellite ? 10 : 14;
+
             return {
                 id: n.id,
                 label: label,
@@ -652,12 +914,20 @@
                 font: {
                     color: borderColor,
                     face: 'VT323, monospace',
-                    size: 14,
-                    vadjust: 8
+                    size: fontSize,
+                    vadjust: isSatellite ? 4 : 8
                 },
                 x: position ? position.x : undefined,
                 y: position ? position.y : undefined,
-                physics: position ? !position.pinned : true
+                physics: position ? !position.pinned : true,
+                // Store satellite metadata for drag handling
+                _isSatellite: isSatellite,
+                _parentId: n.parent_id || null,
+                // Store segmentum (subnet) for nebula rendering
+                _segmentum: n.properties?.segmentum || null,
+                _ip: n.properties?.ip || null,
+                // Keep full properties for getNodeSegmentum fallback
+                properties: n.properties
             };
         }));
 
@@ -681,6 +951,30 @@
             };
         });
 
+        // Create synthetic edges between satellite nodes and their parents
+        const satelliteEdges = [];
+        (graph.nodes || []).forEach(n => {
+            if (n.parent_id && nodeById[n.parent_id]) {
+                satelliteEdges.push({
+                    id: `_satellite_${n.id}`,
+                    from: n.parent_id,
+                    to: n.id,
+                    color: {
+                        color: theme.purple,
+                        highlight: theme.purple,
+                        hover: theme.purple
+                    },
+                    width: 1,
+                    dashes: [2, 4],  // Dotted line to distinguish from real edges
+                    length: 60,  // Short fixed length to keep satellites close
+                    smooth: false,
+                    _isSatelliteEdge: true
+                });
+            }
+        });
+
+        const allEdges = [...edges, ...satelliteEdges];
+
         // Create or update DataSets
         if (nodesDataSet) {
             nodesDataSet.clear();
@@ -691,9 +985,9 @@
 
         if (edgesDataSet) {
             edgesDataSet.clear();
-            edgesDataSet.add(edges);
+            edgesDataSet.add(allEdges);
         } else {
-            edgesDataSet = new vis.DataSet(edges);
+            edgesDataSet = new vis.DataSet(allEdges);
         }
 
         // Create network if not exists
@@ -760,12 +1054,61 @@
                 options
             );
 
-            // Save position when drag ends
+            // Constrain satellite nodes to orbit radius during drag
+            const SATELLITE_ORBIT_RADIUS = 60;  // Distance from parent
+
+            network.on('dragging', (params) => {
+                if (params.nodes.length === 0) return;
+
+                params.nodes.forEach(nodeId => {
+                    const nodeData = nodesDataSet.get(nodeId);
+                    if (!nodeData || !nodeData._isSatellite || !nodeData._parentId) return;
+
+                    // Get parent position
+                    const parentPos = network.getPositions([nodeData._parentId])[nodeData._parentId];
+                    if (!parentPos) return;
+
+                    // Get current drag position
+                    const currentPos = network.getPositions([nodeId])[nodeId];
+                    if (!currentPos) return;
+
+                    // Calculate vector from parent to current position
+                    const dx = currentPos.x - parentPos.x;
+                    const dy = currentPos.y - parentPos.y;
+                    const distance = Math.sqrt(dx * dx + dy * dy);
+
+                    // If too close or too far, constrain to orbit radius
+                    if (distance < SATELLITE_ORBIT_RADIUS * 0.5 || distance > SATELLITE_ORBIT_RADIUS * 1.5) {
+                        const angle = Math.atan2(dy, dx);
+                        const newX = parentPos.x + Math.cos(angle) * SATELLITE_ORBIT_RADIUS;
+                        const newY = parentPos.y + Math.sin(angle) * SATELLITE_ORBIT_RADIUS;
+                        network.moveNode(nodeId, newX, newY);
+                    }
+                });
+            });
+
+            // Save position when drag ends (with orbit constraint for satellites)
             network.on('dragEnd', (params) => {
                 if (params.nodes.length > 0) {
                     params.nodes.forEach(nodeId => {
+                        const nodeData = nodesDataSet.get(nodeId);
                         const positions = network.getPositions([nodeId]);
+
                         if (positions[nodeId]) {
+                            // For satellite nodes, enforce final orbit constraint
+                            if (nodeData && nodeData._isSatellite && nodeData._parentId) {
+                                const parentPos = network.getPositions([nodeData._parentId])[nodeData._parentId];
+                                if (parentPos) {
+                                    const dx = positions[nodeId].x - parentPos.x;
+                                    const dy = positions[nodeId].y - parentPos.y;
+                                    const angle = Math.atan2(dy, dx);
+                                    const finalX = parentPos.x + Math.cos(angle) * SATELLITE_ORBIT_RADIUS;
+                                    const finalY = parentPos.y + Math.sin(angle) * SATELLITE_ORBIT_RADIUS;
+                                    network.moveNode(nodeId, finalX, finalY);
+                                    savePosition(nodeId, { x: finalX, y: finalY });
+                                    return;
+                                }
+                            }
                             savePosition(nodeId, positions[nodeId]);
                         }
                     });
@@ -777,6 +1120,37 @@
                 if (params.nodes.length > 0) {
                     const nodeId = params.nodes[0];
                     openNodeDetailModal(nodeId);
+                }
+            });
+
+            // Multi-select with Ctrl/Cmd+Click or Shift+Click
+            network.on('click', (params) => {
+                if (params.nodes.length > 0) {
+                    const nodeId = params.nodes[0];
+                    const isModifierHeld = params.event.srcEvent.ctrlKey ||
+                                          params.event.srcEvent.metaKey ||
+                                          params.event.srcEvent.shiftKey;
+
+                    if (isModifierHeld) {
+                        // Toggle node in selection
+                        if (selectedNodes.has(nodeId)) {
+                            selectedNodes.delete(nodeId);
+                        } else {
+                            selectedNodes.add(nodeId);
+                        }
+                        updateSelectionUI();
+                    } else if (selectedNodes.size > 0) {
+                        // Regular click clears selection unless clicking a selected node
+                        if (!selectedNodes.has(nodeId)) {
+                            clearSelection();
+                        }
+                    }
+                } else {
+                    // Clicked empty space - clear selection
+                    if (selectedNodes.size > 0 && !params.event.srcEvent.ctrlKey &&
+                        !params.event.srcEvent.metaKey && !params.event.srcEvent.shiftKey) {
+                        clearSelection();
+                    }
                 }
             });
 
@@ -805,6 +1179,11 @@
                 updateZoomDisplay();
             });
 
+            // Segmentum (subnet nebula) rendering - draw galactic regions behind nodes
+            network.on('beforeDrawing', (ctx) => {
+                drawSegmenta(ctx);
+            });
+
             // Recalculate bounds when window is resized
             window.addEventListener('resize', () => {
                 calculateZoomBounds();
@@ -819,10 +1198,16 @@
         }
     }
 
-    // Build tooltip HTML for a node
+    // Build tooltip text for a node (plain text, no HTML - vis-network doesn't render HTML in tooltips)
     function buildTooltip(node) {
-        let html = `<strong>${node.label || node.id}</strong>\n`;
-        html += `Type: ${node.type || 'unknown'}\n`;
+        let text = `${(node.label || node.id).toUpperCase()}\n`;
+        text += `${'─'.repeat(20)}\n`;
+        text += `Type: ${node.type || 'unknown'}\n`;
+
+        // Show parent relationship for interface nodes
+        if (node.parent_id) {
+            text += `Parent: ${node.parent_id}\n`;
+        }
 
         // Status indicator
         const status = node.status || 'unverified';
@@ -833,62 +1218,62 @@
             unreachable: '[X]',
             degraded: '[!]'
         }[status] || '[?]';
-        html += `Status: ${statusIcon} ${status.toUpperCase()}\n`;
+        text += `Status: ${statusIcon} ${status.toUpperCase()}\n`;
 
         if (node.properties) {
-            if (node.properties.ip) html += `IP: ${node.properties.ip}\n`;
-            if (node.properties.description) html += `${node.properties.description}\n`;
+            if (node.properties.ip) text += `IP: ${node.properties.ip}\n`;
+            if (node.properties.description) text += `${node.properties.description}\n`;
         }
 
         // Discovered info
         if (node.discovered) {
             if (node.discovered.mac_address) {
-                html += `MAC: ${node.discovered.mac_address}\n`;
+                text += `MAC: ${node.discovered.mac_address}\n`;
             }
             if (node.discovered.ping_latency_ms !== undefined) {
-                html += `Latency: ${node.discovered.ping_latency_ms}ms\n`;
+                text += `Latency: ${node.discovered.ping_latency_ms}ms\n`;
             }
             if (node.discovered.icmp_latency_ms !== undefined) {
-                html += `ICMP: ${node.discovered.icmp_latency_ms}ms\n`;
+                text += `ICMP: ${node.discovered.icmp_latency_ms}ms\n`;
             }
             // Show services with banners if available
             if (node.discovered.services && node.discovered.services.length > 0) {
-                html += `Services:\n`;
+                text += `Services:\n`;
                 node.discovered.services.forEach(s => {
-                    html += `  ${s.port}/${s.service}`;
-                    if (s.banner) html += ` - ${s.banner.substring(0, 40)}`;
-                    html += `\n`;
+                    text += `  ${s.port}/${s.service}`;
+                    if (s.banner) text += ` - ${s.banner.substring(0, 40)}`;
+                    text += `\n`;
                 });
             } else if (node.discovered.open_ports && node.discovered.open_ports.length > 0) {
-                html += `Ports: ${node.discovered.open_ports.join(', ')}\n`;
+                text += `Ports: ${node.discovered.open_ports.join(', ')}\n`;
             }
             if (node.discovered.reverse_dns) {
-                html += `DNS: ${node.discovered.reverse_dns}\n`;
+                text += `DNS: ${node.discovered.reverse_dns}\n`;
             }
         }
 
         // Last verified timestamp
         if (node.last_verified) {
             const lastVerified = new Date(node.last_verified);
-            html += `Verified: ${lastVerified.toLocaleTimeString()}\n`;
+            text += `Verified: ${lastVerified.toLocaleTimeString()}\n`;
         }
 
         // Truth status
         if (node.truth_status) {
             const truthIcon = node.truth_status === 'conflict' ? '[!]' : '[T]';
-            html += `\nTruth: ${truthIcon} ${node.truth_status.toUpperCase()}\n`;
+            text += `\nTruth: ${truthIcon} ${node.truth_status.toUpperCase()}\n`;
             if (node.truth && node.truth.properties) {
-                html += `Locked Properties:\n`;
+                text += `Locked Properties:\n`;
                 for (const [key, value] of Object.entries(node.truth.properties)) {
-                    html += `  ${key}: ${value}\n`;
+                    text += `  ${key}: ${value}\n`;
                 }
             }
             if (node.has_discrepancy) {
-                html += `\n[!] HERESY DETECTED - Purge required\n`;
+                text += `\n[!] HERESY DETECTED - Purge required\n`;
             }
         }
 
-        return html;
+        return text;
     }
 
     // Save node position to API
@@ -1393,8 +1778,32 @@
             `;
         }
 
+        // Show parent for interface/satellite nodes
+        if (node.parent_id) {
+            html += `
+                <div class="property-item">
+                    <span class="property-label">PARENT</span>
+                    <span class="property-value link" data-node-id="${node.parent_id}">${node.parent_id}</span>
+                </div>
+            `;
+        }
+
         html += '</div>';
+
+        // Add click handler for parent link after setting innerHTML
         container.innerHTML = html;
+
+        // Setup click handlers for parent links
+        container.querySelectorAll('.property-value.link').forEach(el => {
+            el.style.cursor = 'pointer';
+            el.style.textDecoration = 'underline';
+            el.addEventListener('click', () => {
+                const parentId = el.dataset.nodeId;
+                if (parentId) {
+                    openNodeDetailModal(parentId);
+                }
+            });
+        });
     }
 
     function renderNetworkSection(node) {
@@ -1766,6 +2175,611 @@
     // Update status display
     function updateStatus(status) {
         elements.status.textContent = `> STATUS: ${status}`;
+    }
+
+    // ==================== MULTI-SELECT & MERGE ====================
+
+    // Update selection UI (toolbar visibility, node highlighting)
+    function updateSelectionUI() {
+        const count = selectedNodes.size;
+        elements.selectionCountValue.textContent = count;
+
+        if (count >= 2) {
+            elements.selectionToolbar.classList.remove('hidden');
+        } else {
+            elements.selectionToolbar.classList.add('hidden');
+        }
+
+        // Update vis-network selection to show visual highlight
+        if (network) {
+            network.selectNodes(Array.from(selectedNodes));
+        }
+    }
+
+    // Clear all selected nodes
+    function clearSelection() {
+        selectedNodes.clear();
+        updateSelectionUI();
+        if (network) {
+            network.unselectAll();
+        }
+    }
+
+    // Open merge modal
+    function openMergeModal() {
+        if (selectedNodes.size < 2) {
+            updateStatus('ERROR: Select at least 2 nodes to merge');
+            return;
+        }
+
+        // Update count display
+        elements.mergeSelectedCount.textContent = selectedNodes.size;
+
+        // Try to infer a good default parent name from selected nodes
+        const selectedIds = Array.from(selectedNodes);
+        let suggestedName = '';
+
+        // Check if any selected node has a hostname in properties
+        for (const nodeId of selectedIds) {
+            const nodeData = nodesDataSet.get(nodeId);
+            if (nodeData && nodeData.title) {
+                // Try to extract hostname from tooltip or use label
+                const label = nodeData.label || nodeId;
+                // Remove common suffixes and take the first word
+                const cleaned = label.toLowerCase()
+                    .replace(/[^a-z0-9-]/g, '')
+                    .split('-')[0];
+                if (cleaned.length > 2 && !cleaned.match(/^\d/)) {
+                    suggestedName = cleaned;
+                    break;
+                }
+            }
+        }
+
+        elements.mergeParentName.value = suggestedName;
+        updateMergePreview();
+
+        elements.mergeModal.classList.add('active');
+    }
+
+    // Close merge modal
+    function closeMergeModal() {
+        elements.mergeModal.classList.remove('active');
+    }
+
+    // Update merge preview based on current input
+    function updateMergePreview() {
+        const parentName = elements.mergeParentName.value.trim() || 'parent';
+        const selectedIds = Array.from(selectedNodes).sort();
+
+        let html = '<div class="merge-preview-title">PREVIEW</div>';
+
+        selectedIds.forEach((nodeId, i) => {
+            const nodeData = nodesDataSet.get(nodeId);
+            const label = nodeData ? (nodeData.label || nodeId) : nodeId;
+            const interfaceName = `eth${i}`;
+
+            html += `
+                <div class="merge-preview-item">
+                    <span class="merge-preview-from">${label}</span>
+                    <span class="merge-preview-arrow">→</span>
+                    <span class="merge-preview-to">${parentName}:${interfaceName}</span>
+                </div>
+            `;
+        });
+
+        elements.mergePreview.innerHTML = html;
+    }
+
+    // Handle merge submission
+    async function handleMerge() {
+        const parentName = elements.mergeParentName.value.trim();
+        const parentType = elements.mergeParentType.value;
+
+        if (!parentName) {
+            updateStatus('ERROR: Parent name is required');
+            return;
+        }
+
+        if (selectedNodes.size < 2) {
+            updateStatus('ERROR: At least 2 nodes required');
+            return;
+        }
+
+        const nodeIds = Array.from(selectedNodes);
+
+        try {
+            updateStatus('MERGING...');
+
+            const response = await fetch('/api/nodes/merge', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    node_ids: nodeIds,
+                    parent_id: parentName,
+                    parent_type: parentType
+                })
+            });
+
+            if (!response.ok) {
+                const error = await response.text();
+                throw new Error(error || `HTTP ${response.status}`);
+            }
+
+            const result = await response.json();
+            updateStatus(`MERGED: Created ${result.parent_id} with ${result.interface_count} interfaces`);
+
+            // Close modal and clear selection
+            closeMergeModal();
+            clearSelection();
+
+            // Reload graph to show changes
+            await loadGraph();
+
+        } catch (error) {
+            console.error('Merge failed:', error);
+            updateStatus('ERROR: ' + error.message);
+        }
+    }
+
+    // ==================== SECRETS MANAGEMENT ====================
+
+    // Secret type field definitions
+    const secretTypeFields = {
+        ssh_key: [
+            { key: 'key_path', label: 'Key Path', type: 'text', placeholder: '/path/to/key' },
+            { key: 'passphrase', label: 'Passphrase', type: 'password', placeholder: 'Optional passphrase' },
+            { key: 'username', label: 'Username', type: 'text', placeholder: 'SSH username' }
+        ],
+        snmp_community: [
+            { key: 'community', label: 'Community String', type: 'password', placeholder: 'e.g., public' }
+        ],
+        snmpv3: [
+            { key: 'username', label: 'Username', type: 'text' },
+            { key: 'auth_protocol', label: 'Auth Protocol', type: 'select', options: ['MD5', 'SHA', 'SHA256'] },
+            { key: 'auth_password', label: 'Auth Password', type: 'password' },
+            { key: 'priv_protocol', label: 'Privacy Protocol', type: 'select', options: ['DES', 'AES', 'AES256'] },
+            { key: 'priv_password', label: 'Privacy Password', type: 'password' }
+        ],
+        api_token: [
+            { key: 'token', label: 'API Token', type: 'password', placeholder: 'Bearer token or API key' },
+            { key: 'base_url', label: 'Base URL', type: 'text', placeholder: 'https://api.example.com' }
+        ],
+        dns: [
+            { key: 'server', label: 'DNS Server', type: 'text', placeholder: '192.168.0.5' }
+        ],
+        generic: [
+            { key: 'value', label: 'Value', type: 'textarea', placeholder: 'Secret value' }
+        ]
+    };
+
+    // Secret type icons (SVG paths)
+    const secretTypeIcons = {
+        ssh_key: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"/></svg>',
+        snmp_community: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="2" width="20" height="20" rx="2"/><path d="M7 7h10M7 12h10M7 17h6"/></svg>',
+        snmpv3: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="2" width="20" height="20" rx="2"/><path d="M7 7h10M7 12h10M7 17h6"/><circle cx="18" cy="17" r="2"/></svg>',
+        api_token: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg>',
+        dns: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M2 12h20M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>',
+        generic: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>'
+    };
+
+    // Current edit state
+    let currentEditSecret = null;
+
+    // Open secrets management modal
+    function openSecretsModal() {
+        closeDropdown();
+        elements.secretsModal.classList.add('active');
+        loadSecrets();
+    }
+
+    // Close secrets management modal
+    function closeSecretsModal() {
+        elements.secretsModal.classList.remove('active');
+    }
+
+    // Load secrets from API
+    async function loadSecrets() {
+        const typeFilter = elements.secretsTypeFilter.value;
+        const sourceFilter = elements.secretsSourceFilter.value;
+
+        try {
+            let url = '/api/secrets';
+            const params = new URLSearchParams();
+            if (typeFilter) params.append('type', typeFilter);
+            if (sourceFilter) params.append('source', sourceFilter);
+            if (params.toString()) url += '?' + params.toString();
+
+            const response = await fetch(url);
+            if (!response.ok) {
+                throw new Error(`HTTP ${response.status}`);
+            }
+
+            const secrets = await response.json();
+            renderSecretsList(secrets);
+
+        } catch (error) {
+            console.error('Failed to load secrets:', error);
+            elements.secretsList.innerHTML = '<div class="secrets-empty">Failed to load secrets</div>';
+        }
+    }
+
+    // Render secrets list
+    function renderSecretsList(secrets) {
+        if (!secrets || secrets.length === 0) {
+            elements.secretsList.innerHTML = '<div class="secrets-empty">No secrets configured</div>';
+            return;
+        }
+
+        let html = '';
+        for (const secret of secrets) {
+            const icon = secretTypeIcons[secret.type] || secretTypeIcons.generic;
+            const isImmutable = secret.immutable || secret.source === 'mounted';
+
+            html += `
+                <div class="secret-item secret-type-${secret.type} ${isImmutable ? 'immutable' : ''}" data-secret-id="${secret.id}">
+                    <div class="secret-icon">${icon}</div>
+                    <div class="secret-details">
+                        <div class="secret-header">
+                            <span class="secret-name">${escapeHtml(secret.name)}</span>
+                            <span class="secret-id">${escapeHtml(secret.id)}</span>
+                        </div>
+                        <div class="secret-badges">
+                            <span class="secret-badge secret-badge-type">${secret.type}</span>
+                            ${isImmutable ? '<span class="secret-badge secret-badge-mounted">MOUNTED</span>' : '<span class="secret-badge secret-badge-source">OPERATOR</span>'}
+                            ${secret.status && secret.status !== 'unknown' ? `<span class="secret-badge secret-badge-status ${secret.status}">${secret.status}</span>` : ''}
+                        </div>
+                        ${secret.description ? `<div class="secret-description">${escapeHtml(secret.description)}</div>` : ''}
+                        <div class="secret-meta">
+                            ${secret.created_at ? `<span>Created: ${new Date(secret.created_at).toLocaleDateString()}</span>` : ''}
+                            ${secret.last_used_at ? `<span>Last used: ${new Date(secret.last_used_at).toLocaleDateString()}</span>` : ''}
+                        </div>
+                    </div>
+                    <div class="secret-actions">
+                        ${!isImmutable ? `
+                            <button class="secret-action-btn" onclick="editSecret('${secret.id}')">EDIT</button>
+                            <button class="secret-action-btn danger" onclick="deleteSecret('${secret.id}')">DELETE</button>
+                        ` : ''}
+                    </div>
+                </div>
+            `;
+        }
+
+        elements.secretsList.innerHTML = html;
+    }
+
+    // HTML escape utility
+    function escapeHtml(text) {
+        if (!text) return '';
+        const div = document.createElement('div');
+        div.textContent = text;
+        return div.innerHTML;
+    }
+
+    // Open secret edit modal (for new or existing)
+    function openSecretEditModal(secretData = null) {
+        currentEditSecret = secretData;
+
+        if (secretData) {
+            elements.secretEditTitle.textContent = '> EDIT SECRET';
+            elements.secretEditId.value = secretData.id;
+            elements.secretEditId.disabled = true;
+            elements.secretEditName.value = secretData.name || '';
+            elements.secretEditType.value = secretData.type || 'generic';
+            elements.secretEditType.disabled = true;
+            elements.secretEditDescription.value = secretData.description || '';
+        } else {
+            elements.secretEditTitle.textContent = '> ADD SECRET';
+            elements.secretEditId.value = '';
+            elements.secretEditId.disabled = false;
+            elements.secretEditName.value = '';
+            elements.secretEditType.value = 'ssh_key';
+            elements.secretEditType.disabled = false;
+            elements.secretEditDescription.value = '';
+        }
+
+        updateSecretDataFields();
+        elements.secretEditModal.classList.add('active');
+    }
+
+    // Close secret edit modal
+    function closeSecretEditModal() {
+        elements.secretEditModal.classList.remove('active');
+        currentEditSecret = null;
+    }
+
+    // Update data fields based on selected type
+    function updateSecretDataFields() {
+        const type = elements.secretEditType.value;
+        const fields = secretTypeFields[type] || secretTypeFields.generic;
+
+        let html = '<div class="secret-data-fields"><div class="secret-data-fields-title">SECRET DATA</div>';
+
+        for (const field of fields) {
+            const currentValue = currentEditSecret?.data?.[field.key] || '';
+
+            if (field.type === 'textarea') {
+                html += `
+                    <div class="form-group">
+                        <label class="form-label">${field.label}</label>
+                        <textarea class="form-input secret-field-textarea" data-key="${field.key}" placeholder="${field.placeholder || ''}">${escapeHtml(currentValue)}</textarea>
+                    </div>
+                `;
+            } else if (field.type === 'select') {
+                html += `
+                    <div class="form-group">
+                        <label class="form-label">${field.label}</label>
+                        <select class="form-select" data-key="${field.key}">
+                            ${field.options.map(opt => `<option value="${opt}" ${currentValue === opt ? 'selected' : ''}>${opt}</option>`).join('')}
+                        </select>
+                    </div>
+                `;
+            } else {
+                html += `
+                    <div class="form-group">
+                        <label class="form-label">${field.label}</label>
+                        <input type="${field.type}" class="form-input" data-key="${field.key}" value="${escapeHtml(currentValue)}" placeholder="${field.placeholder || ''}">
+                    </div>
+                `;
+            }
+        }
+
+        html += '</div>';
+        elements.secretEditDataFields.innerHTML = html;
+    }
+
+    // Handle secret save
+    async function handleSecretSave() {
+        const id = elements.secretEditId.value.trim();
+        const name = elements.secretEditName.value.trim();
+        const type = elements.secretEditType.value;
+        const description = elements.secretEditDescription.value.trim();
+
+        if (!id || !name) {
+            updateStatus('ERROR: ID and name required');
+            return;
+        }
+
+        // Gather data fields
+        const data = {};
+        elements.secretEditDataFields.querySelectorAll('[data-key]').forEach(el => {
+            const key = el.dataset.key;
+            const value = el.value.trim();
+            if (value) {
+                data[key] = value;
+            }
+        });
+
+        const payload = {
+            id: id,
+            name: name,
+            type: type,
+            description: description,
+            data: data
+        };
+
+        try {
+            elements.secretEditSubmit.disabled = true;
+            updateStatus(currentEditSecret ? 'UPDATING SECRET' : 'CREATING SECRET');
+
+            const url = currentEditSecret ? `/api/secrets/${id}` : '/api/secrets';
+            const method = currentEditSecret ? 'PUT' : 'POST';
+
+            const response = await fetch(url, {
+                method: method,
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload)
+            });
+
+            if (!response.ok) {
+                const error = await response.json();
+                throw new Error(error.details || error.error || `HTTP ${response.status}`);
+            }
+
+            updateStatus(currentEditSecret ? 'SECRET UPDATED' : 'SECRET CREATED');
+            closeSecretEditModal();
+            loadSecrets();
+
+        } catch (error) {
+            console.error('Failed to save secret:', error);
+            updateStatus('ERROR: ' + error.message);
+        } finally {
+            elements.secretEditSubmit.disabled = false;
+        }
+    }
+
+    // Edit existing secret - exposed to global scope for onclick
+    window.editSecret = async function(secretId) {
+        try {
+            const response = await fetch(`/api/secrets/${secretId}?include_data=true`);
+            if (!response.ok) {
+                throw new Error(`HTTP ${response.status}`);
+            }
+            const secret = await response.json();
+            openSecretEditModal(secret);
+        } catch (error) {
+            console.error('Failed to load secret:', error);
+            updateStatus('ERROR: ' + error.message);
+        }
+    };
+
+    // Delete secret - exposed to global scope for onclick
+    window.deleteSecret = async function(secretId) {
+        if (!confirm(`Delete secret "${secretId}"? This cannot be undone.`)) {
+            return;
+        }
+
+        try {
+            updateStatus('DELETING SECRET');
+            const response = await fetch(`/api/secrets/${secretId}`, { method: 'DELETE' });
+            if (!response.ok) {
+                const error = await response.json();
+                throw new Error(error.details || error.error || `HTTP ${response.status}`);
+            }
+            updateStatus('SECRET DELETED');
+            loadSecrets();
+        } catch (error) {
+            console.error('Failed to delete secret:', error);
+            updateStatus('ERROR: ' + error.message);
+        }
+    };
+
+    // ========================================================================
+    // SEGMENTUM (Subnet Nebula) Rendering
+    // Draws galactic-style nebulous regions behind nodes grouped by subnet
+    // ========================================================================
+
+    // Get or assign a color for a segmentum (subnet CIDR)
+    function getSegmentumColor(cidr) {
+        if (!segmentumColors[cidr]) {
+            segmentumColors[cidr] = segmentumPalette[segmentumColorIndex % segmentumPalette.length];
+            segmentumColorIndex++;
+        }
+        return segmentumColors[cidr];
+    }
+
+    // Get segmentum (subnet) for a node - from properties or inferred from IP
+    function getNodeSegmentum(nodeData) {
+        // First check explicit segmentum property
+        if (nodeData._segmentum) return nodeData._segmentum;
+        if (nodeData.properties?.segmentum) return nodeData.properties.segmentum;
+
+        // Fallback: infer from IP address (assume /24)
+        const ip = nodeData._ip || nodeData.properties?.ip;
+        if (ip && typeof ip === 'string') {
+            const parts = ip.split('.');
+            if (parts.length === 4) {
+                return `${parts[0]}.${parts[1]}.${parts[2]}.0/24`;
+            }
+        }
+        return null;
+    }
+
+    // Draw all segmenta (subnet nebulae) on the canvas
+    function drawSegmenta(ctx) {
+        if (!network || !nodesDataSet) return;
+
+        // Group nodes by segmentum
+        const nodesBySegmentum = {};
+        const allNodeIds = nodesDataSet.getIds();
+
+        allNodeIds.forEach(nodeId => {
+            const nodeData = nodesDataSet.get(nodeId);
+            if (!nodeData) return;
+
+            // Skip interface/satellite nodes - they follow their parent
+            if (nodeData._isSatellite) return;
+
+            const segmentum = getNodeSegmentum(nodeData);
+            if (!segmentum) return;
+
+            if (!nodesBySegmentum[segmentum]) {
+                nodesBySegmentum[segmentum] = [];
+            }
+            nodesBySegmentum[segmentum].push(nodeId);
+        });
+
+        // Get all node positions
+        const positions = network.getPositions();
+
+        // Draw each segmentum as a nebulous cloud
+        Object.entries(nodesBySegmentum).forEach(([cidr, nodeIds]) => {
+            if (nodeIds.length < 1) return;
+
+            // Calculate bounding box with padding
+            const nodePositions = nodeIds
+                .map(id => positions[id])
+                .filter(p => p);
+
+            if (nodePositions.length === 0) return;
+
+            const xs = nodePositions.map(p => p.x);
+            const ys = nodePositions.map(p => p.y);
+
+            const minX = Math.min(...xs);
+            const maxX = Math.max(...xs);
+            const minY = Math.min(...ys);
+            const maxY = Math.max(...ys);
+
+            // Add generous padding for the nebula effect
+            const padding = 120;
+            const centerX = (minX + maxX) / 2;
+            const centerY = (minY + maxY) / 2;
+            const width = Math.max(maxX - minX + padding * 2, 200);
+            const height = Math.max(maxY - minY + padding * 2, 200);
+
+            // Get color for this segmentum
+            const color = getSegmentumColor(cidr);
+
+            // Draw nebulous cloud using multiple radial gradients
+            drawNebula(ctx, centerX, centerY, width, height, color, nodePositions);
+
+            // Draw segmentum label
+            drawSegmentumLabel(ctx, cidr, centerX, minY - padding + 20);
+        });
+    }
+
+    // Draw a nebulous cloud effect
+    function drawNebula(ctx, centerX, centerY, width, height, color, nodePositions) {
+        ctx.save();
+
+        // Main elliptical gradient for the overall shape
+        const radiusX = width / 2;
+        const radiusY = height / 2;
+
+        // Create radial gradient from center
+        const gradient = ctx.createRadialGradient(
+            centerX, centerY, 0,
+            centerX, centerY, Math.max(radiusX, radiusY)
+        );
+        gradient.addColorStop(0, color.glow);
+        gradient.addColorStop(0.4, color.base);
+        gradient.addColorStop(1, 'rgba(0, 0, 0, 0)');
+
+        // Draw main ellipse
+        ctx.beginPath();
+        ctx.ellipse(centerX, centerY, radiusX * 1.2, radiusY * 1.2, 0, 0, Math.PI * 2);
+        ctx.fillStyle = gradient;
+        ctx.fill();
+
+        // Add smaller "wisps" around each node for organic feel
+        nodePositions.forEach((pos, i) => {
+            const wispRadius = 60 + (i % 3) * 20; // Vary size
+            const wispGradient = ctx.createRadialGradient(
+                pos.x, pos.y, 0,
+                pos.x, pos.y, wispRadius
+            );
+            wispGradient.addColorStop(0, color.glow);
+            wispGradient.addColorStop(0.5, color.base);
+            wispGradient.addColorStop(1, 'rgba(0, 0, 0, 0)');
+
+            ctx.beginPath();
+            ctx.arc(pos.x, pos.y, wispRadius, 0, Math.PI * 2);
+            ctx.fillStyle = wispGradient;
+            ctx.fill();
+        });
+
+        ctx.restore();
+    }
+
+    // Draw segmentum label
+    function drawSegmentumLabel(ctx, cidr, x, y) {
+        ctx.save();
+
+        ctx.font = '14px VT323, monospace';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+
+        // Format CIDR as SEGMENTUM designation
+        const label = `SEGMENTUM ${cidr}`;
+
+        // Draw with glow effect
+        ctx.shadowColor = 'rgba(57, 255, 20, 0.5)';
+        ctx.shadowBlur = 8;
+        ctx.fillStyle = 'rgba(57, 255, 20, 0.6)';
+        ctx.fillText(label, x, y);
+
+        ctx.restore();
     }
 
     // Start

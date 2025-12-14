@@ -3,10 +3,13 @@ package handler
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"strings"
+	"time"
 
 	"specularium/internal/domain"
 	"specularium/internal/service"
@@ -22,11 +25,41 @@ type SubnetScanner interface {
 	ScanSubnet(ctx context.Context, cidr string) error
 }
 
+// ScanTargets contains categorized scan targets
+type ScanTargets struct {
+	Primary   []string `json:"primary"`
+	Discovery []string `json:"discovery"`
+}
+
+// Bootstrapper performs initial self-discovery
+type Bootstrapper interface {
+	Bootstrap(ctx context.Context) error
+	GetEnvironment() BootstrapEnvironment
+	GetSuggestedScanTargets() []string
+	GetScanTargets() ScanTargets
+}
+
+// BootstrapEnvironment holds detected runtime environment details
+type BootstrapEnvironment struct {
+	InKubernetes   bool     `json:"in_kubernetes"`
+	InDocker       bool     `json:"in_docker"`
+	Hostname       string   `json:"hostname"`
+	PodName        string   `json:"pod_name,omitempty"`
+	PodNamespace   string   `json:"pod_namespace,omitempty"`
+	PodIP          string   `json:"pod_ip,omitempty"`
+	NodeName       string   `json:"node_name,omitempty"`
+	DefaultGateway string   `json:"default_gateway,omitempty"`
+	DNSServers     []string `json:"dns_servers,omitempty"`
+	LocalSubnet    string   `json:"local_subnet,omitempty"`
+	ClusterDNS     string   `json:"cluster_dns,omitempty"`
+}
+
 // GraphHandler handles graph API requests
 type GraphHandler struct {
-	svc       *service.GraphService
-	discovery DiscoveryTrigger
-	scanner   SubnetScanner
+	svc          *service.GraphService
+	discovery    DiscoveryTrigger
+	scanner      SubnetScanner
+	bootstrapper Bootstrapper
 }
 
 // NewGraphHandler creates a new graph handler
@@ -42,6 +75,11 @@ func (h *GraphHandler) SetDiscoveryTrigger(d DiscoveryTrigger) {
 // SetSubnetScanner sets the subnet scanner
 func (h *GraphHandler) SetSubnetScanner(s SubnetScanner) {
 	h.scanner = s
+}
+
+// SetBootstrapper sets the bootstrapper for self-discovery
+func (h *GraphHandler) SetBootstrapper(b Bootstrapper) {
+	h.bootstrapper = b
 }
 
 // Error response structure
@@ -417,7 +455,49 @@ func (h *GraphHandler) ImportScan(w http.ResponseWriter, r *http.Request) {
 	}, http.StatusAccepted)
 }
 
+// Bootstrap triggers self-discovery from the current deployment environment
+func (h *GraphHandler) Bootstrap(w http.ResponseWriter, r *http.Request) {
+	if h.bootstrapper == nil {
+		h.writeError(w, "Bootstrapper not configured", "No bootstrap adapter is registered", http.StatusServiceUnavailable)
+		return
+	}
+
+	// Run bootstrap in background and return immediately
+	go func() {
+		if err := h.bootstrapper.Bootstrap(context.Background()); err != nil {
+			log.Printf("Bootstrap failed: %v", err)
+		}
+	}()
+
+	env := h.bootstrapper.GetEnvironment()
+	targets := h.bootstrapper.GetSuggestedScanTargets()
+
+	h.writeJSON(w, map[string]interface{}{
+		"status":                "bootstrap_started",
+		"environment":           env,
+		"suggested_scan_targets": targets,
+	}, http.StatusAccepted)
+}
+
+// GetEnvironment returns the detected deployment environment
+func (h *GraphHandler) GetEnvironment(w http.ResponseWriter, r *http.Request) {
+	if h.bootstrapper == nil {
+		h.writeError(w, "Bootstrapper not configured", "No bootstrap adapter is registered", http.StatusServiceUnavailable)
+		return
+	}
+
+	env := h.bootstrapper.GetEnvironment()
+	scanTargets := h.bootstrapper.GetScanTargets()
+
+	h.writeJSON(w, map[string]interface{}{
+		"environment":            env,
+		"suggested_scan_targets": scanTargets.Primary,   // Backwards compat
+		"scan_targets":           scanTargets,           // New structured format
+	}, http.StatusOK)
+}
+
 // ClearGraph removes all nodes, edges, and positions
+// After clearing, it automatically re-runs bootstrap to rediscover infrastructure
 func (h *GraphHandler) ClearGraph(w http.ResponseWriter, r *http.Request) {
 	if err := h.svc.ClearGraph(r.Context()); err != nil {
 		log.Printf("Failed to clear graph: %v", err)
@@ -425,7 +505,172 @@ func (h *GraphHandler) ClearGraph(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	h.writeJSON(w, map[string]string{"status": "cleared"}, http.StatusOK)
+	// Auto-trigger bootstrap after clear to rediscover infrastructure
+	if h.bootstrapper != nil {
+		go func() {
+			log.Printf("Auto-triggering bootstrap after graph clear...")
+			if err := h.bootstrapper.Bootstrap(context.Background()); err != nil {
+				log.Printf("Post-clear bootstrap failed: %v", err)
+			}
+		}()
+	}
+
+	// Also trigger discovery adapters (nmap, verifier, etc.)
+	if h.discovery != nil {
+		go func() {
+			log.Printf("Auto-triggering discovery adapters after graph clear...")
+			if err := h.discovery.TriggerSyncAll(context.Background()); err != nil {
+				log.Printf("Post-clear discovery failed: %v", err)
+			}
+		}()
+	}
+
+	h.writeJSON(w, map[string]string{"status": "cleared", "bootstrap": "triggered"}, http.StatusOK)
+}
+
+// RegisterClient creates or updates a node for the browser client
+// This allows passive discovery of clients connecting to the UI
+func (h *GraphHandler) RegisterClient(w http.ResponseWriter, r *http.Request) {
+	// Get client IP from request
+	clientIP := getClientIP(r)
+	if clientIP == "" {
+		h.writeError(w, "Could not determine client IP", "", http.StatusBadRequest)
+		return
+	}
+
+	// Parse optional user agent info from request body
+	var req struct {
+		UserAgent string `json:"user_agent,omitempty"`
+		Hostname  string `json:"hostname,omitempty"`
+	}
+	if r.Body != nil {
+		json.NewDecoder(r.Body).Decode(&req) // Ignore errors, fields are optional
+	}
+
+	// Generate node ID from IP
+	nodeID := strings.ReplaceAll(clientIP, ".", "-")
+
+	// Infer segmentum from IP
+	segmentum := ""
+	parts := strings.Split(clientIP, ".")
+	if len(parts) == 4 {
+		segmentum = fmt.Sprintf("%s.%s.%s.0/24", parts[0], parts[1], parts[2])
+	}
+
+	// Check if node already exists
+	existing, _ := h.svc.GetNode(r.Context(), nodeID)
+	now := time.Now()
+
+	if existing != nil {
+		// Update last seen via updates map
+		updates := map[string]interface{}{
+			"last_seen": now,
+		}
+
+		// Add discovered fields
+		discovered := existing.Discovered
+		if discovered == nil {
+			discovered = make(map[string]any)
+		}
+		discovered["last_browser_visit"] = now.Format(time.RFC3339)
+		if req.UserAgent != "" {
+			discovered["user_agent"] = req.UserAgent
+		}
+		updates["discovered"] = discovered
+
+		if err := h.svc.UpdateNode(r.Context(), nodeID, updates); err != nil {
+			log.Printf("Failed to update client node %s: %v", nodeID, err)
+		}
+
+		h.writeJSON(w, map[string]any{
+			"status":    "updated",
+			"node_id":   nodeID,
+			"client_ip": clientIP,
+			"segmentum": segmentum,
+		}, http.StatusOK)
+		return
+	}
+
+	// Create new client node
+	label := clientIP
+	if req.Hostname != "" {
+		label = req.Hostname
+	}
+
+	node := &domain.Node{
+		ID:     nodeID,
+		Type:   domain.NodeTypeServer, // Generic server type for client devices
+		Label:  label,
+		Source: "client",
+		Status: domain.NodeStatusVerified, // We know it's alive - it's talking to us!
+		Properties: map[string]any{
+			"ip":        clientIP,
+			"segmentum": segmentum,
+			"role":      "client",
+		},
+		Discovered: map[string]any{
+			"last_browser_visit": now.Format(time.RFC3339),
+		},
+	}
+
+	if req.UserAgent != "" {
+		node.Discovered["user_agent"] = req.UserAgent
+	}
+
+	node.LastVerified = &now
+	node.LastSeen = &now
+
+	if err := h.svc.CreateNode(r.Context(), node); err != nil {
+		// Node might already exist from a scan - try update instead
+		if existing, _ := h.svc.GetNode(r.Context(), nodeID); existing != nil {
+			updates := map[string]interface{}{"last_seen": now}
+			h.svc.UpdateNode(r.Context(), nodeID, updates)
+			h.writeJSON(w, map[string]any{
+				"status":    "updated",
+				"node_id":   nodeID,
+				"client_ip": clientIP,
+				"segmentum": segmentum,
+			}, http.StatusOK)
+			return
+		}
+		log.Printf("Failed to create client node %s: %v", nodeID, err)
+		h.writeError(w, "Failed to create client node", err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	log.Printf("Registered new client: %s (segmentum: %s)", clientIP, segmentum)
+
+	h.writeJSON(w, map[string]any{
+		"status":    "created",
+		"node_id":   nodeID,
+		"client_ip": clientIP,
+		"segmentum": segmentum,
+	}, http.StatusCreated)
+}
+
+// getClientIP extracts the real client IP from the request
+// Handles X-Forwarded-For and X-Real-IP headers from reverse proxies
+func getClientIP(r *http.Request) string {
+	// Check X-Forwarded-For first (may contain multiple IPs)
+	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
+		// Take the first IP (original client)
+		if idx := strings.Index(xff, ","); idx > 0 {
+			return strings.TrimSpace(xff[:idx])
+		}
+		return strings.TrimSpace(xff)
+	}
+
+	// Check X-Real-IP
+	if xri := r.Header.Get("X-Real-IP"); xri != "" {
+		return strings.TrimSpace(xri)
+	}
+
+	// Fall back to RemoteAddr (may include port)
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		return r.RemoteAddr
+	}
+	return host
 }
 
 // TriggerDiscovery triggers the discovery/verification process for all nodes
@@ -509,4 +754,60 @@ func extractPathParam(path, prefix string) string {
 		return strings.TrimPrefix(path, prefix)
 	}
 	return ""
+}
+
+// MergeRequest represents the request to merge nodes as interfaces
+type MergeRequest struct {
+	NodeIDs    []string `json:"node_ids"`
+	ParentID   string   `json:"parent_id"`
+	ParentType string   `json:"parent_type"`
+}
+
+// MergeResponse is returned after a successful merge
+type MergeResponse struct {
+	ParentID       string   `json:"parent_id"`
+	InterfaceCount int      `json:"interface_count"`
+	InterfaceIDs   []string `json:"interface_ids"`
+}
+
+// MergeNodes merges multiple nodes into a parent with interface children
+func (h *GraphHandler) MergeNodes(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		h.writeError(w, "Method not allowed", "", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req MergeRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		h.writeError(w, "Invalid request body", err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	if len(req.NodeIDs) < 2 {
+		h.writeError(w, "At least 2 nodes required", "", http.StatusBadRequest)
+		return
+	}
+
+	if req.ParentID == "" {
+		h.writeError(w, "Parent ID is required", "", http.StatusBadRequest)
+		return
+	}
+
+	if req.ParentType == "" {
+		req.ParentType = "server" // Default type
+	}
+
+	// Call service to perform merge
+	interfaceIDs, err := h.svc.MergeNodesAsInterfaces(r.Context(), req.NodeIDs, req.ParentID, domain.NodeType(req.ParentType))
+	if err != nil {
+		log.Printf("Failed to merge nodes: %v", err)
+		h.writeError(w, "Failed to merge nodes", err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	h.writeJSON(w, MergeResponse{
+		ParentID:       req.ParentID,
+		InterfaceCount: len(interfaceIDs),
+		InterfaceIDs:   interfaceIDs,
+	}, http.StatusOK)
 }

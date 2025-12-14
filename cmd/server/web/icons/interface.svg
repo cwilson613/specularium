@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 500 500">
+    <g fill="currentColor">
+        <!-- Outer port housing -->
+        <path d="M350,150 L350,350 L150,350 L150,150 L350,150 Z M320,180 L180,180 L180,320 L320,320 L320,180 Z"/>
+
+        <!-- Inner port cavity -->
+        <rect x="190" y="190" width="120" height="120" fill="none" stroke="currentColor" stroke-width="8"/>
+
+        <!-- Pin contacts (RJ45 style) -->
+        <rect x="205" y="220" width="12" height="60"/>
+        <rect x="225" y="220" width="12" height="60"/>
+        <rect x="245" y="220" width="12" height="60"/>
+        <rect x="265" y="220" width="12" height="60"/>
+        <rect x="285" y="220" width="12" height="60"/>
+
+        <!-- Connection indicator notch -->
+        <path d="M230,190 L270,190 L270,200 L230,200 Z"/>
+
+        <!-- Cable attachment point -->
+        <rect x="225" y="320" width="50" height="30"/>
+        <path d="M235,350 L235,400 L265,400 L265,350"/>
+    </g>
+</svg>

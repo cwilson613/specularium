@@ -26,6 +26,11 @@ type ScannerConfig struct {
 	MaxConcurrent int
 	// BannerTimeout for reading service banners
 	BannerTimeout time.Duration
+	// DNSServer is an optional DNS server to use for PTR lookups
+	// If empty, the system resolver is used
+	DNSServer string
+	// CapabilityManager provides access to secrets for enhanced discovery
+	Capabilities *CapabilityManager
 }
 
 // DefaultScannerConfig returns sensible defaults for homelab scanning
@@ -171,7 +176,7 @@ func (s *ScannerAdapter) ScanSubnet(ctx context.Context, cidr string) (*domain.G
 
 	// Phase 3: Convert to graph fragment
 	log.Printf("Phase 3: Converting %d hosts to graph fragment", len(hosts))
-	fragment := s.hostsToFragment(hosts)
+	fragment := s.hostsToFragment(hosts, cidr)
 	log.Printf("Phase 3 complete: Created fragment with %d nodes", len(fragment.Nodes))
 
 	s.publishProgress("discovery-complete", map[string]interface{}{
@@ -376,7 +381,23 @@ func (s *ScannerAdapter) probePort(ctx context.Context, ip string, port int) boo
 }
 
 // reverseDNS performs a reverse DNS lookup
+// Priority: 1) Static DNSServer config, 2) DNS capability from secrets, 3) System resolver
 func (s *ScannerAdapter) reverseDNS(ip string) string {
+	dnsServer := s.config.DNSServer
+
+	// If no static DNS configured, try to get from capabilities
+	if dnsServer == "" && s.config.Capabilities != nil {
+		if dnsCap, err := s.config.Capabilities.GetDNSCapability(context.Background()); err == nil && dnsCap != nil {
+			dnsServer = dnsCap.Server
+		}
+	}
+
+	if dnsServer != "" {
+		// Use custom DNS server for PTR lookup
+		return s.reverseDNSCustom(ip, dnsServer)
+	}
+
+	// Fall back to system resolver
 	names, err := net.LookupAddr(ip)
 	if err != nil || len(names) == 0 {
 		return ""
@@ -385,6 +406,36 @@ func (s *ScannerAdapter) reverseDNS(ip string) string {
 	if len(hostname) > 0 && hostname[len(hostname)-1] == '.' {
 		hostname = hostname[:len(hostname)-1]
 	}
+	return hostname
+}
+
+// reverseDNSCustom performs PTR lookup against a specific DNS server
+func (s *ScannerAdapter) reverseDNSCustom(ip, dnsServer string) string {
+	// Create a custom resolver
+	resolver := &net.Resolver{
+		PreferGo: true,
+		Dial: func(ctx context.Context, network, address string) (net.Conn, error) {
+			d := net.Dialer{Timeout: s.config.Timeout}
+			// Always connect to the configured DNS server
+			return d.DialContext(ctx, "udp", dnsServer+":53")
+		},
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), s.config.Timeout*2)
+	defer cancel()
+
+	// Use LookupAddr with our custom resolver
+	names, err := resolver.LookupAddr(ctx, ip)
+	if err != nil || len(names) == 0 {
+		log.Printf("PTR lookup for %s via %s failed: %v", ip, dnsServer, err)
+		return ""
+	}
+
+	hostname := names[0]
+	if len(hostname) > 0 && hostname[len(hostname)-1] == '.' {
+		hostname = hostname[:len(hostname)-1]
+	}
+	log.Printf("PTR lookup for %s via %s: %s", ip, dnsServer, hostname)
 	return hostname
 }
 
@@ -436,38 +487,154 @@ func (s *ScannerAdapter) grabBanner(ip string, port int) string {
 }
 
 // hostsToFragment converts discovered hosts to a graph fragment
-func (s *ScannerAdapter) hostsToFragment(hosts []DiscoveredHost) *domain.GraphFragment {
+// Groups hosts by PTR hostname - multiple IPs with the same hostname become
+// a parent node with interface children
+// The segmentum parameter is the CIDR that was scanned (e.g., "192.168.0.0/24")
+func (s *ScannerAdapter) hostsToFragment(hosts []DiscoveredHost, segmentum string) *domain.GraphFragment {
 	fragment := domain.NewGraphFragment()
 
+	// Group hosts by their resolved hostname (PTR)
+	// Hosts without PTR get their own group keyed by IP
+	hostGroups := make(map[string][]DiscoveredHost)
 	for _, host := range hosts {
-		// Generate node ID from IP (sanitized)
-		nodeID := strings.ReplaceAll(host.IP, ".", "-")
+		groupKey := host.Hostname
+		if groupKey == "" {
+			// No PTR - use IP as unique key (won't group with anything)
+			groupKey = "_ip_" + host.IP
+		}
+		hostGroups[groupKey] = append(hostGroups[groupKey], host)
+	}
 
-		// Determine node type based on open ports
-		nodeType := inferNodeType(host.OpenPorts)
+	now := time.Now()
 
-		// Use hostname as label if available, otherwise IP
-		label := host.Hostname
-		if label == "" {
-			label = host.IP
+	for groupKey, groupHosts := range hostGroups {
+		if len(groupHosts) == 1 && strings.HasPrefix(groupKey, "_ip_") {
+			// Single host with no PTR - create standalone node
+			host := groupHosts[0]
+			node := s.createStandaloneNode(host, segmentum, now)
+			fragment.AddNode(node)
+		} else if len(groupHosts) == 1 {
+			// Single host with PTR - still create standalone (no need for interfaces)
+			host := groupHosts[0]
+			node := s.createStandaloneNode(host, segmentum, now)
+			fragment.AddNode(node)
 		} else {
-			// Clean up label - remove domain suffix for readability (only for hostnames, not IPs)
-			if idx := strings.Index(label, "."); idx > 0 {
-				shortLabel := label[:idx]
-				if len(shortLabel) > 2 {
-					label = shortLabel
-				}
+			// Multiple hosts with same PTR - create parent + interface children
+			s.createHostWithInterfaces(fragment, groupKey, groupHosts, segmentum, now)
+		}
+	}
+
+	return fragment
+}
+
+// createStandaloneNode creates a single node for a discovered host
+// segmentum is the CIDR range this host was discovered in (for visual grouping)
+func (s *ScannerAdapter) createStandaloneNode(host DiscoveredHost, segmentum string, now time.Time) domain.Node {
+	// Generate node ID from IP (sanitized)
+	nodeID := strings.ReplaceAll(host.IP, ".", "-")
+
+	// Determine node type based on open ports
+	nodeType := inferNodeType(host.OpenPorts)
+
+	// Use hostname as label if available, otherwise IP
+	label := host.Hostname
+	if label == "" {
+		label = host.IP
+	} else {
+		// Clean up label - remove domain suffix for readability
+		if idx := strings.Index(label, "."); idx > 0 {
+			shortLabel := label[:idx]
+			if len(shortLabel) > 2 {
+				label = shortLabel
 			}
 		}
+	}
 
-		node := domain.Node{
-			ID:     nodeID,
-			Type:   nodeType,
-			Label:  label,
-			Source: "scanner",
-			Status: domain.NodeStatusVerified,
+	node := domain.Node{
+		ID:     nodeID,
+		Type:   nodeType,
+		Label:  label,
+		Source: "scanner",
+		Status: domain.NodeStatusVerified,
+		Properties: map[string]any{
+			"ip":        host.IP,
+			"segmentum": segmentum, // CIDR for visual fabric grouping
+		},
+		Discovered: map[string]any{
+			"open_ports":  host.OpenPorts,
+			"services":    host.PortDetails,
+			"reverse_dns": host.Hostname,
+		},
+	}
+
+	if host.MACAddress != "" {
+		node.Discovered["mac_address"] = host.MACAddress
+	}
+
+	node.LastVerified = &now
+	node.LastSeen = &now
+
+	return node
+}
+
+// createHostWithInterfaces creates a parent node with interface children
+// when multiple IPs resolve to the same PTR hostname
+// segmentum is the CIDR range for visual fabric grouping
+func (s *ScannerAdapter) createHostWithInterfaces(fragment *domain.GraphFragment, hostname string, hosts []DiscoveredHost, segmentum string, now time.Time) {
+	// Extract short hostname for parent ID and label
+	shortName := hostname
+	if idx := strings.Index(hostname, "."); idx > 0 {
+		shortName = hostname[:idx]
+	}
+
+	// Determine parent node type from combined port analysis
+	allPorts := []int{}
+	for _, h := range hosts {
+		allPorts = append(allPorts, h.OpenPorts...)
+	}
+	parentType := inferNodeType(allPorts)
+
+	// Create parent node
+	parentNode := domain.Node{
+		ID:     shortName,
+		Type:   parentType,
+		Label:  shortName,
+		Source: "scanner",
+		Status: domain.NodeStatusVerified,
+		Properties: map[string]any{
+			"hostname":  hostname,
+			"segmentum": segmentum, // CIDR for visual fabric grouping
+		},
+		Discovered: map[string]any{
+			"interface_count": len(hosts),
+			"reverse_dns":     hostname,
+		},
+	}
+	parentNode.LastVerified = &now
+	parentNode.LastSeen = &now
+	fragment.AddNode(parentNode)
+
+	// Create interface nodes for each IP
+	// Sort hosts by IP for consistent interface naming
+	sort.Slice(hosts, func(i, j int) bool {
+		return hosts[i].IP < hosts[j].IP
+	})
+
+	for i, host := range hosts {
+		interfaceName := fmt.Sprintf("eth%d", i)
+		interfaceID := fmt.Sprintf("%s:%s", shortName, interfaceName)
+
+		interfaceNode := domain.Node{
+			ID:       interfaceID,
+			Type:     domain.NodeTypeInterface,
+			Label:    interfaceName,
+			ParentID: shortName,
+			Source:   "scanner",
+			Status:   domain.NodeStatusVerified,
 			Properties: map[string]any{
-				"ip": host.IP,
+				"ip":             host.IP,
+				"interface_name": interfaceName,
+				"segmentum":      segmentum, // CIDR for visual fabric grouping
 			},
 			Discovered: map[string]any{
 				"open_ports":  host.OpenPorts,
@@ -477,17 +644,22 @@ func (s *ScannerAdapter) hostsToFragment(hosts []DiscoveredHost) *domain.GraphFr
 		}
 
 		if host.MACAddress != "" {
-			node.Discovered["mac_address"] = host.MACAddress
+			interfaceNode.Discovered["mac_address"] = host.MACAddress
 		}
 
-		now := time.Now()
-		node.LastVerified = &now
-		node.LastSeen = &now
-
-		fragment.AddNode(node)
+		interfaceNode.LastVerified = &now
+		interfaceNode.LastSeen = &now
+		fragment.AddNode(interfaceNode)
 	}
 
-	return fragment
+	log.Printf("Created parent node %s with %d interfaces (IPs: %v)",
+		shortName, len(hosts), func() []string {
+			ips := make([]string, len(hosts))
+			for i, h := range hosts {
+				ips[i] = h.IP
+			}
+			return ips
+		}())
 }
 
 // inferNodeType guesses the device type based on open ports
